@@ -11,6 +11,8 @@ An MCP (Model Context Protocol) server that exposes the powerful functionality o
 - **Git Integration**: AI-assisted Git operations and analysis
 - **Multi-modal Capabilities**: Leverage Gemini's ability to work with text, code, and images
 
+## Check out the project wikis for further guidance and ideas!
+
 ## 🚀 Quick Start
 
 ### Prerequisites
