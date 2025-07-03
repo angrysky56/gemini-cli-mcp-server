@@ -1,0 +1,11 @@
+# Core MCP dependencies
+mcp>=1.0.0
+
+# HTTP client for API requests
+aiohttp>=3.8.0
+
+# Type hints and validation
+pydantic>=2.0.0
+
+# Additional utilities
+pathlib2>=2.3.0; python_version < "3.4"
