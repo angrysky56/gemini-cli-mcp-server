@@ -1,33 +1,54 @@
 # Gemini CLI MCP Server
 
-An MCP (Model Context Protocol) server that exposes the powerful functionality of Google's Gemini CLI to other MCP clients like Claude Desktop. This enables seamless integration of Gemini's AI capabilities, code analysis, and development tools into your workflow.
+A **proper** Model Context Protocol (MCP) server that provides access to Google's Gemini CLI with all its built-in capabilities and tools.
 
-## 🌟 Features
+## 🎯 What This Does RIGHT
 
-- **AI-Powered Chat**: Interactive chat sessions with Gemini AI
-- **Code Analysis**: Intelligent code analysis and insights
-- **App Generation**: Generate new applications from descriptions
-- **Code Assistance**: Get AI help for specific code problems
-- **Git Integration**: AI-assisted Git operations and analysis
-- **Multi-modal Capabilities**: Leverage Gemini's ability to work with text, code, and images
+This MCP server **correctly** wraps the actual `gemini` command-line tool, preserving all of its sophisticated features:
 
-## Check out the project wikis for further guidance and ideas!
+- ✅ **Uses your existing gemini-cli authentication** (Google login or API key)
+- ✅ **Leverages all built-in tools** (file reading, shell commands, web search, etc.)
+- ✅ **Maintains conversation context** through interactive sessions
+- ✅ **Supports `@` file inclusion** and `!` shell command syntax  
+- ✅ **Access to `/memory`, `/tools`, `/stats`** and other CLI commands
+- ✅ **Preserves ReAct loops** and sophisticated reasoning capabilities
+- ✅ **Checkpointing and debugging** support
+- ✅ **MCP server discovery** via `/mcp` command
 
-## 🚀 Quick Start
+## 🚫 What This Does NOT Do (Unlike Broken Implementations)
 
-### Prerequisites
+- ❌ Create a separate API client that bypasses gemini-cli
+- ❌ Require separate API key management  
+- ❌ Lose contextual conversation abilities
+- ❌ Miss built-in tools and capabilities
+- ❌ Recreate functionality that gemini-cli already provides
 
-- Python 3.10 or higher
-- Node.js 18 or higher (for Gemini CLI)
-- A Google account or Gemini API key
+## Prerequisites
 
-### Installation
+1. **Gemini CLI must be installed and working:**
+   ```bash
+   npm install -g @google/gemini-cli
+   gemini --version  # Verify it works
+   ```
 
-1. **Clone and set up the project:**
+2. **Gemini CLI must be authenticated:**
+   - Run `gemini` once and complete the authentication flow
+   - Use either "Login with Google" (recommended for free tier) or API key
+   - No additional authentication needed for this MCP server
+
+3. **Python 3.12+ with uv:**
+   ```bash
+   uv --version  # Should be available
+   ```
+
+## Installation
+
+1. **Clone and setup:**
    ```bash
    cd /home/ty/Repositories/ai_workspace/gemini-cli-mcp-server
+   uv venv --python 3.12 --seed
    source .venv/bin/activate
-   uv add mcp
+   uv sync
    ```
 
 2. **Test the server:**
@@ -35,224 +56,151 @@ An MCP (Model Context Protocol) server that exposes the powerful functionality o
    python src/main.py
    ```
 
-### Claude Desktop Integration
+## Usage Patterns
 
-Add this configuration to your Claude Desktop `claude_desktop_config.json`:
+### 1. Single Prompts (Non-Interactive)
+```json
+{
+  "tool": "gemini_prompt",
+  "arguments": {
+    "prompt": "Explain this codebase",
+    "include_files": ["src/main.py", "README.md"],
+    "working_directory": "/path/to/project",
+    "model": "gemini-2.5-pro",
+    "checkpointing": true
+  }
+}
+```
+
+### 2. Interactive Sessions (Recommended for Complex Tasks)
+```json
+// Start session
+{
+  "tool": "gemini_start_session", 
+  "arguments": {
+    "session_id": "coding_session_1",
+    "working_directory": "/path/to/project",
+    "checkpointing": true
+  }
+}
+
+// Chat with context
+{
+  "tool": "gemini_session_chat",
+  "arguments": {
+    "session_id": "coding_session_1", 
+    "message": "Analyze the main.py file and suggest improvements"
+  }
+}
+
+// Include files dynamically
+{
+  "tool": "gemini_session_include_files",
+  "arguments": {
+    "session_id": "coding_session_1",
+    "files": ["src/components/*.py", "tests/test_*.py"]
+  }
+}
+
+// Run shell commands
+{
+  "tool": "gemini_session_shell",
+  "arguments": {
+    "session_id": "coding_session_1",
+    "command": "pytest tests/ -v"
+  }
+}
+
+// Save important info to memory
+{
+  "tool": "gemini_session_memory",
+  "arguments": {
+    "session_id": "coding_session_1",
+    "action": "add",
+    "text": "User prefers TypeScript with strict mode enabled"
+  }
+}
+
+// Close when done
+{
+  "tool": "gemini_close_session",
+  "arguments": {"session_id": "coding_session_1"}
+}
+```
+
+### 3. Discovery and Status
+```json
+// List all built-in tools
+{"tool": "gemini_list_tools"}
+
+// List configured MCP servers  
+{"tool": "gemini_list_mcp_servers"}
+
+// Get session statistics
+{"tool": "gemini_session_stats", "arguments": {"session_id": "coding_session_1"}}
+```
+
+## Configuration for Claude Desktop
+
+Add to your MCP configuration file:
 
 ```json
 {
   "mcpServers": {
     "gemini-cli": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server",
-        "run",
-        "python",
-        "src/main.py"
-      ],
+      "command": "python",
+      "args": ["/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server/src/main.py"],
+      "cwd": "/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server",
       "env": {
-        "GEMINI_API_KEY": "your_api_key_here"
+        "PATH": "/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server/.venv/bin:${PATH}"
       }
     }
   }
 }
 ```
 
-## 🛠️ Available Tools
+## Architecture Benefits
 
-### 1. **gemini_chat**
-Start an interactive chat session with Gemini AI.
+This implementation is **correct** because it:
 
-**Parameters:**
-- `message` (required): Initial message to send to Gemini
-- `working_directory` (optional): Working directory for the chat session
+1. **Respects the user's setup** - Uses existing gemini-cli auth and config
+2. **Preserves all capabilities** - Nothing is lost from the original CLI
+3. **Maintains context** - Interactive sessions keep conversation history
+4. **Leverages built-ins** - All the sophisticated tools and ReAct loops work
+5. **Handles complexity** - Multi-step workflows, file operations, shell commands
+6. **Stays updated** - Benefits from gemini-cli improvements automatically
 
-**Example:**
-```
-Help me understand this codebase structure
-```
+## Troubleshooting
 
-### 2. **gemini_analyze_code**
-Analyze code in a directory using Gemini AI.
+**"Gemini CLI not found"**
+- Install: `npm install -g @google/gemini-cli`
+- Verify: `which gemini` and `gemini --version`
 
-**Parameters:**
-- `directory` (required): Directory containing code to analyze
-- `query` (required): Specific analysis query or task
+**"Session did not become ready"**  
+- Gemini CLI may still be authenticating
+- Try running `gemini` manually first to complete auth flow
 
-**Example:**
-```
-Directory: ./my-project
-Query: Find potential security vulnerabilities
-```
+**"Authentication required"**
+- Run `gemini` once and complete the auth process
+- This MCP server uses your existing authentication
 
-### 3. **gemini_generate_app**
-Generate a new application using Gemini AI.
+## Development
 
-**Parameters:**
-- `description` (required): Description of the application to generate
-- `output_directory` (required): Directory where the app should be generated
-- `framework` (optional): Framework preference (e.g., React, Flask, etc.)
+The key insight is that this MCP server acts as a **bridge** to gemini-cli rather than **replacing** it. This preserves all the sophisticated capabilities while making them available through the MCP protocol.
 
-**Example:**
-```
-Description: A todo app with user authentication
-Output Directory: ./new-todo-app
-Framework: React
-```
+For extending functionality, consider:
+1. Adding new tools that combine multiple gemini-cli commands
+2. Session management features (save/restore, branching)
+3. Workflow automation using the interactive session capabilities
 
-### 4. **gemini_code_assist**
-Get AI assistance for specific code problems.
+## Why This Approach Matters
 
-**Parameters:**
-- `file_path` (required): Path to the file needing assistance
-- `task` (required): What you want help with
+Previous implementations tried to bypass gemini-cli and create direct API clients. This fails because:
 
-**Example:**
-```
-File Path: ./src/main.py
-Task: Optimize this code for better performance
-```
+1. **Missing the ReAct loop** - Gemini CLI's sophisticated reasoning patterns
+2. **No built-in tools** - File operations, shell commands, web search, etc.
+3. **Lost context management** - GEMINI.md files, memory, persistent sessions
+4. **Authentication complexity** - Separate setup instead of using existing config
+5. **Feature lag** - Manual recreation of features instead of automatic benefits
 
-### 5. **gemini_list_models**
-List available Gemini models from Google's API.
-
-**Parameters:**
-- `api_key` (optional): Gemini API key (uses environment variable if not provided)
-
-**Example:**
-```
-# Uses GEMINI_API_KEY from environment
-List available models
-
-# Or specify API key directly
-List models with api_key: your_key_here
-```
-
-### 6. **gemini_git_assist**
-Get AI assistance with Git operations and analysis.
-
-**Parameters:**
-- `repository_path` (required): Path to the Git repository
-- `operation` (required): Git operation or analysis
-
-**Example:**
-```
-Repository Path: ./my-repo
-Operation: Analyze recent changes and suggest improvements
-```
-
-## 📊 Available Resources
-
-### **gemini://status**
-Get current status and configuration of Gemini CLI.
-
-### **gemini://help**
-Get help information for Gemini CLI commands.
-
-## 🔧 Configuration
-
-### Environment Variables
-
-- `GEMINI_API_KEY`: Your Gemini API key (get one from [Google AI Studio](https://aistudio.google.com/apikey))
-- `LOG_LEVEL`: Logging level (default: INFO)
-
-### Authentication
-
-The server supports multiple authentication methods:
-
-1. **API Key**: Set `GEMINI_API_KEY` environment variable
-2. **Google Account**: The Gemini CLI will prompt for authentication
-3. **Google Workspace**: Follow the Gemini CLI authentication guide
-
-## 🧪 Development
-
-### Running in Development Mode
-
-```bash
-# Activate virtual environment
-source .venv/bin/activate
-
-# Install development dependencies
-uv add --dev pytest pytest-asyncio ruff mypy
-
-# Run the server
-python src/main.py
-
-# Run tests
-pytest
-
-# Format code
-ruff format .
-
-# Type checking
-mypy src/
-```
-
-### Testing with MCP Inspector
-
-You can test the server using the MCP Inspector:
-
-```bash
-npx @modelcontextprotocol/inspector uv --directory /home/ty/Repositories/ai_workspace/gemini-cli-mcp-server run python src/main.py
-```
-
-## 🔍 Troubleshooting
-
-### Common Issues
-
-1. **Gemini CLI not found**: Make sure Node.js 18+ is installed
-2. **Authentication errors**: Ensure your API key is valid or complete the authentication flow
-3. **Permission errors**: Check that the working directories are accessible
-
-### Debugging
-
-- Check logs in stderr for detailed error information
-- Use `LOG_LEVEL=DEBUG` for more verbose logging
-- Test Gemini CLI directly: `npx https://github.com/google-gemini/gemini-cli`
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 📝 License
-
-This project is licensed under the MIT License.
-
-## 🔗 Related Projects
-
-- [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) - The underlying Gemini CLI tool
-- [Model Context Protocol](https://modelcontextprotocol.io/) - MCP specification and documentation
-- [MCP Servers](https://github.com/modelcontextprotocol/servers) - Official MCP servers collection
-
-## ⚡ Advanced Usage
-
-### Custom Prompts
-
-You can create custom prompts by combining multiple tools:
-
-1. Use `gemini_analyze_code` to understand a codebase
-2. Use `gemini_code_assist` to get specific help
-3. Use `gemini_generate_app` to create related components
-
-### Integration with Other Tools
-
-This MCP server works well with other MCP servers:
-
-- Combine with file system servers for comprehensive project management
-- Use with Git servers for advanced version control workflows
-- Integrate with database servers for full-stack development assistance
-
-### Performance Tips
-
-- Use specific working directories to limit context size
-- Break complex tasks into smaller, focused queries
-- Cache API responses when appropriate for development workflows
-
----
-
-**Note**: This MCP server requires an active internet connection and valid Gemini API credentials to function properly.
+This implementation **correctly** leverages the gemini-cli binary as intended.

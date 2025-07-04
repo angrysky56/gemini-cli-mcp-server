@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gemini-cli-mcp-server"
 version = "0.1.0"
-description = "MCP server that exposes Gemini CLI functionality"
+description = "MCP server that properly wraps the actual Gemini CLI binary with all its built-in capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -22,8 +22,6 @@ classifiers = [
 ]
 dependencies = [
   "mcp>=1.2.0",
-  "aiofiles>=23.0.0",
-  "aiohttp>=3.9.0",
   "pydantic>=2.0.0",
   "typing-extensions>=4.5.0",
 ]
