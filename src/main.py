@@ -9,6 +9,7 @@ leveraging all its built-in tools and capabilities.
 import asyncio
 import json
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -130,6 +131,8 @@ class GeminiCLIMCPServer:
                         "type": "object",
                         "properties": {
                             "session_id": {"type": "string", "description": "Unique identifier for this session"},
+                            "starting_directory": {"type": "string", "description": "Optional: The directory to start the Gemini CLI session in. Defaults to the user's home directory."},
+                            "auto_approve": {"type": "boolean", "description": "Optional: Auto-approve tool executions. Defaults to true for MCP usage."}
                         },
                         "required": ["session_id"]
                     }
@@ -307,19 +310,21 @@ class GeminiCLIMCPServer:
     async def _start_interactive_session(self, arguments: dict[str, Any]) -> str:
         """Start an interactive Gemini CLI session"""
         session_id = arguments["session_id"]
+        starting_directory = arguments.get("starting_directory", os.path.expanduser("~"))
         await self._cleanup_dead_sessions()
         if session_id in self.interactive_sessions:
             return f"Session {session_id} already exists"
         try:
             session = await self.gemini_cli.start_interactive_session(
-                working_directory=arguments.get("working_directory", "."), # Pass working_directory
+                working_directory=starting_directory, # Pass working_directory
                 model=arguments.get("model"), # Pass model
                 debug=arguments.get("debug", False), # Pass debug
-                checkpointing=arguments.get("checkpointing", False) # Pass checkpointing
+                checkpointing=arguments.get("checkpointing", False), # Pass checkpointing
+                auto_approve=arguments.get("auto_approve", True)  # Default to True for MCP usage
             )
             self.interactive_sessions[session_id] = session
             self.session_metadata[session_id] = {"created_at": asyncio.get_event_loop().time()}
-            return f"Interactive session {session_id} started successfully"
+            return f"Interactive session {session_id} started successfully with auto-approval enabled"
         except Exception as e:
             logger.error(f"Failed to start session {session_id}: {str(e)}")
             return f"Failed to start session {session_id}: {str(e)}"

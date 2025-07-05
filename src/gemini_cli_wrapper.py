@@ -68,7 +68,8 @@ class GeminiCLIWrapper:
         working_directory: str = ".",
         model: str | None = None,
         debug: bool = False,
-        checkpointing: bool = False
+        checkpointing: bool = False,
+        auto_approve: bool = False
     ) -> 'GeminiInteractiveSession':
         """
         Start an interactive Gemini CLI session using pexpect.
@@ -78,6 +79,7 @@ class GeminiCLIWrapper:
             model: Optional model to use
             debug: Enable debug mode
             checkpointing: Enable checkpointing
+            auto_approve: Enable auto-approval for tool executions
 
         Returns:
             A GeminiInteractiveSession object
@@ -90,11 +92,13 @@ class GeminiCLIWrapper:
             cmd_parts.append("-d")
         if checkpointing:
             cmd_parts.append("-c")
+        if auto_approve:
+            cmd_parts.append("--yolo")
 
         try:
             logger.debug(f"Starting pexpect-based interactive session: {' '.join(cmd_parts)}")
 
-            session = GeminiInteractiveSession(cmd_parts, working_directory)
+            session = GeminiInteractiveSession(cmd_parts, working_directory, auto_approve=auto_approve)
             await session.start()
             return session
 
@@ -107,9 +111,10 @@ class GeminiCLIWrapper:
 class GeminiInteractiveSession:
     """Manages an interactive Gemini CLI session using pexpect"""
 
-    def __init__(self, cmd_parts: list[str], working_directory: str):
+    def __init__(self, cmd_parts: list[str], working_directory: str, auto_approve: bool = False):
         self.cmd_parts = cmd_parts
         self.working_directory = working_directory
+        self.auto_approve = auto_approve
         self.child: pexpect.spawn | None = None
         self._ready = False
 
@@ -148,15 +153,19 @@ class GeminiInteractiveSession:
             raise
 
     async def send_prompt(self, prompt: str) -> str:
-        """Send a prompt to Gemini and get the response, waiting indefinitely."""
+        """Send a prompt to Gemini and get the response asynchronously."""
         if not self._ready or not self.child:
             raise Exception("Session not ready")
 
         try:
             logger.debug(f"Sending prompt: {prompt[:100]}...")
+
+            # Send the prompt (non-blocking)
             await asyncio.get_event_loop().run_in_executor(
                 None, self._send_prompt_blocking, prompt
             )
+
+            # Read the response (this is where the time is spent)
             raw_response = await self._read_response()
             cleaned_response = self._clean_response(raw_response, prompt)
             logger.debug(f"Received cleaned response length: {len(cleaned_response)}")
@@ -176,65 +185,124 @@ class GeminiInteractiveSession:
 
     async def _read_response(self) -> str:
         """
-        Reads the complete response from the Gemini CLI by waiting for output to cease,
-        or raises InteractivePromptDetected if an interactive prompt is found.
+        Reads the complete response from the Gemini CLI.
         """
         if not self.child:
             raise Exception("Child process not available")
 
         response_buffer = ""
-        logger.debug("Reading response until output ceases or prompt detected...")
+        logger.debug("Reading response from Gemini CLI...")
 
-        read_timeout = 3.0  # Consider the response complete after 3s of silence.
+        # Much simpler approach: keep reading until we see the prompt again
+        max_wait_time = 300.0  # 5 minutes max
+        start_time = asyncio.get_event_loop().time()
+
+        # Track if we're handling tool approval
+        handling_approval = False
+
         while self.child.isalive():
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self.child.expect, r'.+', read_timeout
-                )
-                if isinstance(self.child.after, bytes):
-                    new_data = self.child.after.decode('utf-8', errors='ignore')
-                    response_buffer += new_data
-                else:
-                    # This case should ideally not be reached if expect() is successful
-                    # but handles type checker concerns.
-                    new_data = ""
+            current_time = asyncio.get_event_loop().time()
+            if current_time - start_time > max_wait_time:
+                logger.warning(f"Response reading timed out after {max_wait_time}s")
+                break
 
-                # Check for interactive prompts after receiving new data
-                if self._is_interactive_prompt(response_buffer):
-                    raise InteractivePromptDetected(prompt_text=response_buffer)
+            try:
+                # Read available data
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None, self.child.read_nonblocking, 4096, 1.0
+                )
+
+                if data:
+                    text = data.decode('utf-8', errors='ignore')
+                    response_buffer += text
+
+                    # Check for tool approval prompts and auto-handle if enabled
+                    if self.auto_approve and not handling_approval:
+                        if any(pattern in response_buffer.lower() for pattern in [
+                            'allow execution', 'approve this', 'proceed with',
+                            'run this command', 'execute this tool'
+                        ]):
+                            logger.info("Auto-approving tool execution")
+                            self.child.sendline('y')
+                            handling_approval = True
+                            # Continue reading after sending approval
+                            continue
+
+                    # Check for other interactive prompts
+                    if self._is_interactive_prompt(response_buffer):
+                        raise InteractivePromptDetected(prompt_text=response_buffer)
+
+                    # Check if we've reached the end (look for the prompt pattern)
+                    if self._response_seems_complete(response_buffer):
+                        logger.info("Response appears complete")
+                        break
 
             except pexpect.TIMEOUT:
-                if response_buffer:
-                    logger.info(f"Response complete (detected by {read_timeout}s of inactivity).")
-                    break
+                # No data available, but keep waiting
+                await asyncio.sleep(0.1)
                 continue
             except pexpect.EOF:
                 logger.warning("EOF reached. Gemini CLI process terminated.")
                 break
             except InteractivePromptDetected:
-                raise # Re-raise the custom exception
+                raise
             except Exception as e:
-                logger.error(f"An unexpected error occurred while reading response: {e}")
+                logger.error(f"Error reading response: {e}")
                 break
 
         return response_buffer
 
+    def _response_seems_complete(self, text: str) -> bool:
+        """Check if the response seems complete by looking for the prompt pattern."""
+        if not text:
+            return False
+
+        # Look for the prompt box pattern at the end
+        lines = text.split('\n')
+        if len(lines) < 3:
+            return False
+
+        # Check last few lines for the prompt box structure
+        last_lines = '\n'.join(lines[-10:])  # Check last 10 lines
+
+        # Look for the bottom of the prompt box with directory info
+        if ('~/Repositories' in last_lines and
+            'gemini-2.5-pro' in last_lines and
+            'context left' in last_lines):
+            return True
+
+        return False
+
     def _is_interactive_prompt(self, text: str) -> bool:
         """
-        Checks if the given text (or its end) contains patterns indicative of an interactive prompt.
-        This is a heuristic and might need refinement based on actual gemini-cli prompts.
+        Checks if the given text contains patterns indicative of an interactive prompt.
+        If auto_approve is enabled, automatically handles tool approval prompts.
         """
         text_lower = text.lower().strip()
+
+        # Specific patterns for Gemini CLI tool approval
+        if self.auto_approve and self.child:
+            # Check for tool execution approval prompts
+            if any(pattern in text_lower for pattern in [
+                'allow execution', 'allow this tool', 'approve this action',
+                'proceed with', 'execute this command', 'run this tool'
+            ]):
+                # Auto-approve by sending 'y'
+                logger.info("Auto-approving tool execution prompt")
+                self.child.sendline('y')
+                return False  # Don't treat as blocking prompt since we handled it
+
         # Common patterns for confirmation/input prompts
         prompt_patterns = [
             r'\(y/n\)', r'\[y/n\]', r'\(yes/no\)', r'\[yes/no\]',
             r'confirm', r'proceed', r'continue', r'allow',
             r'select an option', r'enter your choice',
-            r'\[\\d+\]', # e.g., [1], [2] for numbered options
+            r'\[\d+\]', # e.g., [1], [2] for numbered options
             r'\(default: .*\)', # e.g., (default: yes)
             r'press enter to continue',
             r'type your response',
             r'authentication required', # Specific to gemini-cli auth
+            r'waiting for auth', # Specific to gemini-cli tool auth
             r'allow execution', # Specific to gemini-cli tool execution
         ]
 
@@ -248,20 +316,67 @@ class GeminiInteractiveSession:
 
     def _clean_response(self, text: str, prompt: str) -> str:
         """Clean up the pexpect output to return only the AI's response."""
-        # 1. Remove the prompt that was sent, as it's often echoed.
-        # We'll remove the first line if it closely matches the prompt.
-        lines = text.split('\n')
-        if lines and lines[0].strip() == prompt.strip():
-            cleaned_text = '\n'.join(lines[1:])
-        else:
-            cleaned_text = text
+        if not text:
+            return ""
 
-        # 2. Remove ANSI escape codes.
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[0-?]*[ -/]*[@-~])')
-        cleaned_text = ansi_escape.sub('', cleaned_text)
+        # 1. Remove ANSI escape codes first
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        cleaned_text = ansi_escape.sub('', text)
 
-        # 3. Final whitespace cleanup.
-        return cleaned_text.strip()
+        # 2. Remove carriage returns and normalize line endings
+        cleaned_text = cleaned_text.replace('\r\n', '\n').replace('\r', '\n')
+
+        # 3. Remove all Unicode box-drawing characters and similar interface elements
+        # This includes the entire range from U+2500 to U+257F
+        box_chars = re.compile(r'[\u2500-\u257F\u2580-\u259F\u2800-\u28FF]')
+        cleaned_text = box_chars.sub('', cleaned_text)
+
+        # 4. Also remove common Unicode characters that might appear in the interface
+        # Like arrows, bullets, and other decorative elements
+        interface_chars = re.compile(r'[\u2190-\u21FF\u25A0-\u25FF\u2600-\u26FF]')
+        cleaned_text = interface_chars.sub('', cleaned_text)
+
+        # 5. Split into lines and extract only meaningful content
+        lines = cleaned_text.split('\n')
+        meaningful_lines = []
+
+        # Skip the initial echo of the prompt
+        skip_until_after_prompt = True
+
+        for line in lines:
+            line_stripped = line.strip()
+
+            # Skip empty lines
+            if not line_stripped:
+                continue
+
+            # Skip the echoed prompt at the beginning
+            if skip_until_after_prompt and line_stripped == prompt.strip():
+                skip_until_after_prompt = False
+                continue
+
+            # Skip interface elements - be very aggressive
+            if (line_stripped.startswith('Using ') and 'MCP servers' in line_stripped or
+                line_stripped.startswith('~/') or
+                'no sandbox' in line_stripped or
+                'gemini-2.5-pro' in line_stripped or
+                'context left)' in line_stripped or
+                '(main*)' in line_stripped or
+                '(see /docs)' in line_stripped or
+                line_stripped == '>' or
+                line_stripped.startswith('> ') or
+                # Skip lines that look like file paths in the prompt box
+                re.match(r'^[~\/].*\s+\(.*\)$', line_stripped) or
+                # Skip status lines
+                'Waiting for auth' in line_stripped or
+                'Press ESC to cancel' in line_stripped):
+                continue
+
+            # Only keep lines with actual content
+            if len(line_stripped) > 1:
+                meaningful_lines.append(line_stripped)
+
+        return '\n'.join(meaningful_lines).strip()
 
     def is_running(self) -> bool:
         """Check if the session is still running"""
