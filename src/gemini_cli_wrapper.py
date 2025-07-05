@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
 """
-Proper Gemini CLI Wrapper for MCP Server
+Pexpect-based Gemini CLI Wrapper for MCP Server
 
-This module provides a proper interface to the actual gemini-cli binary,
-leveraging all its built-in capabilities and tools.
+This module provides a proper interface to the actual gemini-cli binary using pexpect,
+the standard library for controlling interactive applications.
 """
 
 import asyncio
 import logging
-import shlex
+import re
 import subprocess
+import sys
 
+import pexpect
+
+# Configure logging to stderr for MCP servers
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
 logger = logging.getLogger(__name__)
 
 
+# Custom exception for interactive prompts
+class InteractivePromptDetected(Exception):
+    def __init__(self, prompt_text: str):
+        super().__init__(f"Interactive prompt detected: {prompt_text}")
+        self.prompt_text = prompt_text
+
+
 class GeminiCLIWrapper:
-    """Wrapper for the actual gemini CLI binary"""
+    """Pexpect-based wrapper for the actual gemini CLI binary with persistent session"""
 
     def __init__(self, gemini_command: str = "gemini"):
         """
@@ -28,91 +44,24 @@ class GeminiCLIWrapper:
     def _verify_gemini_available(self) -> None:
         """Verify that gemini-cli is available and working"""
         try:
-            # Use shell=True to properly inherit PATH from the environment
             result = subprocess.run(
-                f"{self.gemini_command} --version",
-                shell=True,
+                [self.gemini_command, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
             if result.returncode != 0:
-                raise Exception(f"Gemini CLI not working: {result.stderr}")
-            logger.info(f"Gemini CLI available: {result.stdout.strip()}")
+                raise Exception(f"Gemini CLI not working (exit code {result.returncode}): {result.stderr}")
+
+            version_info = result.stdout.strip()
+            logger.info(f"Gemini CLI available: {version_info}")
+
+        except FileNotFoundError:
+            raise Exception(f"Gemini CLI command '{self.gemini_command}' not found in PATH")
+        except subprocess.TimeoutExpired:
+            raise Exception("Gemini CLI version check timed out")
         except Exception as e:
             raise Exception(f"Failed to verify Gemini CLI: {str(e)}")
-
-    async def execute_prompt(
-        self,
-        prompt: str,
-        working_directory: str = ".",
-        model: str | None = None,
-        include_files: list[str] | None = None,
-        debug: bool = False,
-        yolo: bool = False,
-        checkpointing: bool = False
-    ) -> str:
-        """
-        Execute a single prompt using gemini CLI with -p flag.
-
-        Args:
-            prompt: The prompt to send to Gemini
-            working_directory: Directory to run gemini from
-            model: Optional model to use (e.g., "gemini-2.5-pro")
-            include_files: Optional list of files to include with @ syntax
-            debug: Enable debug mode
-            yolo: Enable auto-approval mode
-            checkpointing: Enable checkpointing
-
-        Returns:
-            The response from Gemini CLI
-        """
-        # Build the command string
-        cmd_parts = [self.gemini_command]
-
-        if model:
-            cmd_parts.extend(["-m", shlex.quote(model)])
-        if debug:
-            cmd_parts.append("-d")
-        if yolo:
-            cmd_parts.append("-y")
-        if checkpointing:
-            cmd_parts.append("-c")
-
-        # Include files using @ syntax if specified
-        if include_files:
-            file_refs = " ".join(f"@{shlex.quote(file)}" for file in include_files)
-            prompt = f"{file_refs} {prompt}"
-
-        cmd_parts.extend(["-p", shlex.quote(prompt)])
-        cmd_string = " ".join(cmd_parts)
-
-        try:
-            # Run gemini CLI from the specified working directory using shell=True
-            result = await asyncio.create_subprocess_shell(
-                cmd_string,
-                cwd=working_directory,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await result.communicate()
-            if stdout is not None:
-                stdout = stdout.decode()
-            if stderr is not None:
-                stderr = stderr.decode()
-
-            if result.returncode != 0:
-                error_msg = f"Gemini CLI failed: {stderr}"
-                logger.error(error_msg)
-                return f"Error: {error_msg}"
-
-            return stdout.strip()
-
-        except Exception as e:
-            error_msg = f"Failed to execute Gemini CLI: {str(e)}"
-            logger.error(error_msg)
-            return f"Error: {error_msg}"
 
     async def start_interactive_session(
         self,
@@ -122,7 +71,7 @@ class GeminiCLIWrapper:
         checkpointing: bool = False
     ) -> 'GeminiInteractiveSession':
         """
-        Start an interactive Gemini CLI session.
+        Start an interactive Gemini CLI session using pexpect.
 
         Args:
             working_directory: Directory to run gemini from
@@ -136,24 +85,17 @@ class GeminiCLIWrapper:
         cmd_parts = [self.gemini_command]
 
         if model:
-            cmd_parts.extend(["-m", shlex.quote(model)])
+            cmd_parts.extend(["-m", model])
         if debug:
             cmd_parts.append("-d")
         if checkpointing:
             cmd_parts.append("-c")
 
-        cmd_string = " ".join(cmd_parts)
-
         try:
-            process = await asyncio.create_subprocess_shell(
-                cmd_string,
-                cwd=working_directory,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            session = GeminiInteractiveSession(process, working_directory)
-            await session.wait_for_ready()
+            logger.debug(f"Starting pexpect-based interactive session: {' '.join(cmd_parts)}")
+
+            session = GeminiInteractiveSession(cmd_parts, working_directory)
+            await session.start()
             return session
 
         except Exception as e:
@@ -161,159 +103,197 @@ class GeminiCLIWrapper:
             logger.error(error_msg)
             raise Exception(error_msg)
 
-    async def list_tools(self, working_directory: str = ".") -> str:
-        """Get the list of available tools from Gemini CLI"""
-        return await self.execute_prompt("/tools", working_directory)
-
-    async def list_mcp_servers(self, working_directory: str = ".") -> str:
-        """Get the list of configured MCP servers"""
-        return await self.execute_prompt("/mcp", working_directory)
-
-    async def get_memory(self, working_directory: str = ".") -> str:
-        """Get the current memory/context from Gemini CLI"""
-        return await self.execute_prompt("/memory show", working_directory)
-
-    async def get_stats(self, working_directory: str = ".") -> str:
-        """Get session statistics from Gemini CLI"""
-        return await self.execute_prompt("/stats", working_directory)
-
 
 class GeminiInteractiveSession:
-    """Manages an interactive Gemini CLI session"""
+    """Manages an interactive Gemini CLI session using pexpect"""
 
-    def __init__(self, process: asyncio.subprocess.Process, working_directory: str):
-        self.process = process
+    def __init__(self, cmd_parts: list[str], working_directory: str):
+        self.cmd_parts = cmd_parts
         self.working_directory = working_directory
+        self.child: pexpect.spawn | None = None
         self._ready = False
 
-    async def wait_for_ready(self, timeout: float = 30.0) -> None:
-        """Wait for the session to be ready for input"""
+    async def start(self) -> None:
+        """Start the pexpect session"""
         try:
-            # Wait for the gemini prompt to appear
-            await asyncio.wait_for(self._wait_for_prompt(), timeout)
+            self.child = await asyncio.get_event_loop().run_in_executor(
+                None, self._start_pexpect_session
+            )
+            await self._wait_for_ready()
             self._ready = True
-        except asyncio.TimeoutError:
-            raise Exception("Gemini CLI session did not become ready within timeout")
+            logger.info("Gemini pexpect session ready")
 
-    async def _wait_for_prompt(self) -> None:
-        """Wait for the gemini prompt to appear"""
-        buffer = ""
-        while True:
-            if self.process.stdout is None:
-                raise Exception("Process stdout is None")
+        except Exception as e:
+            raise Exception(f"Failed to start pexpect session: {str(e)}")
 
-            data = await self.process.stdout.read(1)
-            if not data:
-                break
+    def _start_pexpect_session(self) -> pexpect.spawn:
+        """Start the pexpect session (blocking operation)"""
+        command = ' '.join(self.cmd_parts)
+        # Set a very long timeout for the spawn itself to avoid premature termination
+        child = pexpect.spawn(command, cwd=self.working_directory, timeout=None)
+        if logger.isEnabledFor(logging.DEBUG):
+            child.logfile_read = sys.stderr.buffer
+        return child
 
-            buffer += data.decode()
-            # Look for common prompt indicators
-            if any(indicator in buffer for indicator in ["> ", "$ ", "gemini"]):
-                break
+    async def _wait_for_ready(self) -> None:
+        """Wait for Gemini to be ready for input by clearing initial output."""
+        if not self.child:
+            raise Exception("Pexpect child process is not started")
+        try:
+            # Clear any startup text by reading until the first prompt is likely shown
+            await self._read_response()
+            logger.debug("Gemini session startup complete.")
+        except Exception as e:
+            logger.warning(f"Error during initial session ready wait: {e}")
+            raise
 
-    async def send_command(self, command: str, timeout: float = 60.0) -> str:
-        """
-        Send a command to the interactive session and get the response.
-
-        Args:
-            command: The command to send
-            timeout: Maximum time to wait for response
-
-        Returns:
-            The response from Gemini
-        """
-        if not self._ready:
+    async def send_prompt(self, prompt: str) -> str:
+        """Send a prompt to Gemini and get the response, waiting indefinitely."""
+        if not self._ready or not self.child:
             raise Exception("Session not ready")
 
-        if self.process.stdin is None:
-            raise Exception("Process stdin is None")
-
         try:
-            # Send the command
-            self.process.stdin.write(f"{command}\n".encode())
-            await self.process.stdin.drain()
-
-            # Read the response
-            response = await asyncio.wait_for(
-                self._read_until_prompt(),
-                timeout
+            logger.debug(f"Sending prompt: {prompt[:100]}...")
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._send_prompt_blocking, prompt
             )
+            raw_response = await self._read_response()
+            cleaned_response = self._clean_response(raw_response, prompt)
+            logger.debug(f"Received cleaned response length: {len(cleaned_response)}")
+            return cleaned_response
 
-            return response.strip()
-
-        except asyncio.TimeoutError:
-            return "Error: Command timed out"
+        except InteractivePromptDetected:
+            raise # Re-raise to be caught by the task monitor
         except Exception as e:
-            return f"Error: {str(e)}"
+            logger.error(f"Error sending prompt: {str(e)}")
+            await self.close() # Close session on error
+            raise
 
-    async def _read_until_prompt(self) -> str:
-        """Read output until we see a prompt again"""
-        buffer = ""
-        if self.process.stdout is None:
-            return "Error: Process stdout is None"
+    def _send_prompt_blocking(self, prompt: str) -> None:
+        """Send prompt (blocking operation)"""
+        if self.child:
+            self.child.sendline(prompt)
 
-        while True:
+    async def _read_response(self) -> str:
+        """
+        Reads the complete response from the Gemini CLI by waiting for output to cease,
+        or raises InteractivePromptDetected if an interactive prompt is found.
+        """
+        if not self.child:
+            raise Exception("Child process not available")
+
+        response_buffer = ""
+        logger.debug("Reading response until output ceases or prompt detected...")
+
+        read_timeout = 3.0  # Consider the response complete after 3s of silence.
+        while self.child.isalive():
             try:
-                data = await self.process.stdout.read(1024)
-                if not data:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self.child.expect, r'.+', read_timeout
+                )
+                if isinstance(self.child.after, bytes):
+                    new_data = self.child.after.decode('utf-8', errors='ignore')
+                    response_buffer += new_data
+                else:
+                    # This case should ideally not be reached if expect() is successful
+                    # but handles type checker concerns.
+                    new_data = ""
+
+                # Check for interactive prompts after receiving new data
+                if self._is_interactive_prompt(response_buffer):
+                    raise InteractivePromptDetected(prompt_text=response_buffer)
+
+            except pexpect.TIMEOUT:
+                if response_buffer:
+                    logger.info(f"Response complete (detected by {read_timeout}s of inactivity).")
                     break
-
-                buffer += data.decode()
-
-                # Look for prompt indicators that suggest we're ready for next input
-                lines = buffer.split('\n')
-                if len(lines) > 1 and any(
-                    line.strip().endswith('>') or
-                    line.strip().endswith('$') or
-                    '>' in line[-10:]  # Look for prompt in last 10 chars
-                    for line in lines[-3:]  # Check last 3 lines
-                ):
-                    break
-
-            except Exception:
+                continue
+            except pexpect.EOF:
+                logger.warning("EOF reached. Gemini CLI process terminated.")
+                break
+            except InteractivePromptDetected:
+                raise # Re-raise the custom exception
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while reading response: {e}")
                 break
 
-        return buffer
+        return response_buffer
 
-    async def include_files(self, files: list[str]) -> str:
-        """Include files in the conversation using @ syntax"""
-        file_refs = " ".join(f"@{file}" for file in files)
-        return await self.send_command(f"Include these files: {file_refs}")
+    def _is_interactive_prompt(self, text: str) -> bool:
+        """
+        Checks if the given text (or its end) contains patterns indicative of an interactive prompt.
+        This is a heuristic and might need refinement based on actual gemini-cli prompts.
+        """
+        text_lower = text.lower().strip()
+        # Common patterns for confirmation/input prompts
+        prompt_patterns = [
+            r'\(y/n\)', r'\[y/n\]', r'\(yes/no\)', r'\[yes/no\]',
+            r'confirm', r'proceed', r'continue', r'allow',
+            r'select an option', r'enter your choice',
+            r'\[\\d+\]', # e.g., [1], [2] for numbered options
+            r'\(default: .*\)', # e.g., (default: yes)
+            r'press enter to continue',
+            r'type your response',
+            r'authentication required', # Specific to gemini-cli auth
+            r'allow execution', # Specific to gemini-cli tool execution
+        ]
 
-    async def run_shell_command(self, command: str) -> str:
-        """Run a shell command using the ! syntax"""
-        return await self.send_command(f"!{command}")
+        # Check the last few lines for prompts
+        last_lines = "\n".join(text_lower.splitlines()[-5:])
+        for pattern in prompt_patterns:
+            if re.search(pattern, last_lines):
+                logger.debug(f"Detected interactive prompt pattern: {pattern}")
+                return True
+        return False
+
+    def _clean_response(self, text: str, prompt: str) -> str:
+        """Clean up the pexpect output to return only the AI's response."""
+        # 1. Remove the prompt that was sent, as it's often echoed.
+        # We'll remove the first line if it closely matches the prompt.
+        lines = text.split('\n')
+        if lines and lines[0].strip() == prompt.strip():
+            cleaned_text = '\n'.join(lines[1:])
+        else:
+            cleaned_text = text
+
+        # 2. Remove ANSI escape codes.
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[0-?]*[ -/]*[@-~])')
+        cleaned_text = ansi_escape.sub('', cleaned_text)
+
+        # 3. Final whitespace cleanup.
+        return cleaned_text.strip()
+
+    def is_running(self) -> bool:
+        """Check if the session is still running"""
+        return self._ready and self.child is not None and self.child.isalive()
 
     async def save_memory(self, text: str) -> str:
-        """Save something to memory"""
-        return await self.send_command(f"/memory add {text}")
-
-    async def get_tools(self) -> str:
-        """Get available tools"""
-        return await self.send_command("/tools")
+        return await self.send_prompt(f"Please remember this: {text}")
 
     async def get_memory(self) -> str:
-        """Get current memory"""
-        return await self.send_command("/memory show")
+        return await self.send_prompt("/memory")
+
+    async def get_tools(self) -> str:
+        return await self.send_prompt("/tools")
 
     async def get_stats(self) -> str:
-        """Get session stats"""
-        return await self.send_command("/stats")
+        return await self.send_prompt("/stats")
 
     async def compress_context(self) -> str:
-        """Compress the conversation context"""
-        return await self.send_command("/compress")
+        return await self.send_prompt("/compress")
 
     async def close(self) -> None:
-        """Close the interactive session"""
-        try:
-            if self._ready and self.process.stdin:
-                self.process.stdin.write(b"/quit\n")
-                await self.process.stdin.drain()
-
-            await self.process.wait()
-        except Exception as e:
-            logger.warning(f"Error closing session: {e}")
-            if self.process.returncode is None:
-                self.process.terminate()
-                await self.process.wait()
+        """Close the session"""
+        self._ready = False
+        if self.child and self.child.isalive():
+            try:
+                self.child.sendline("/quit")
+                await asyncio.sleep(0.5)
+                self.child.terminate()
+                await asyncio.sleep(0.5)
+                if self.child.isalive():
+                    self.child.kill(9)
+            except Exception as e:
+                logger.warning(f"Error closing session: {e}")
+            finally:
+                self.child = None

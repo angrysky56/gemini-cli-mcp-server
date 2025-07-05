@@ -1,0 +1,872 @@
+#!/usr/bin/env python3
+"""
+PTY-based Gemini CLI Wrapper for MCP Server
+
+This module provides a proper interface to the actual gemini-cli binary using PTY,
+which allows proper terminal interaction for meta-commands like /tools, /mcp, etc.
+"""
+
+import asyncio
+import fcntl
+import logging
+import os
+import pty
+import re
+import subprocess
+import sys
+
+# Configure logging to stderr for MCP servers
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
+
+
+class GeminiCLIWrapper:
+    """PTY-based wrapper for the actual gemini CLI binary with persistent session"""
+
+    def __init__(self, gemini_command: str = "gemini"):
+        """
+        Args:
+            gemini_command: The command to run gemini-cli (default: "gemini")
+        """
+        self.gemini_command = gemini_command
+        self._persistent_session = None
+        self._session_lock = asyncio.Lock()
+        self._verify_gemini_available()
+
+    def _verify_gemini_available(self) -> None:
+        """Verify that gemini-cli is available and working"""
+        try:
+            result = subprocess.run(
+                [self.gemini_command, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                raise Exception(f"Gemini CLI not working (exit code {result.returncode}): {result.stderr}")
+
+            version_info = result.stdout.strip()
+            logger.info(f"Gemini CLI available: {version_info}")
+
+        except FileNotFoundError:
+            raise Exception(f"Gemini CLI command '{self.gemini_command}' not found in PATH")
+        except subprocess.TimeoutExpired:
+            raise Exception("Gemini CLI version check timed out")
+        except Exception as e:
+            raise Exception(f"Failed to verify Gemini CLI: {str(e)}")
+
+    async def start_interactive_session(
+        self,
+        working_directory: str = ".",
+        model: str | None = None,
+        debug: bool = False,
+        checkpointing: bool = False
+    ) -> 'GeminiInteractiveSession':
+        """
+        Start an interactive Gemini CLI session using PTY.
+
+        Args:
+            working_directory: Directory to run gemini from
+            model: Optional model to use
+            debug: Enable debug mode
+            checkpointing: Enable checkpointing
+
+        Returns:
+            A GeminiInteractiveSession object
+        """
+        cmd_parts = [self.gemini_command]
+
+        if model:
+            cmd_parts.extend(["-m", model])
+        if debug:
+            cmd_parts.append("-d")
+        if checkpointing:
+            cmd_parts.append("-c")
+
+        try:
+            logger.debug(f"Starting PTY-based interactive session: {' '.join(cmd_parts)}")
+
+            # Create a pseudo-terminal for proper CLI interaction
+            master_fd, slave_fd = pty.openpty()
+
+            # Start the process with the PTY
+            process = await asyncio.create_subprocess_exec(
+                *cmd_parts,
+                cwd=working_directory,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=os.environ.copy(),
+                preexec_fn=os.setsid  # Create a new process group
+            )
+
+            # Close the slave fd in the parent process
+            os.close(slave_fd)
+
+            session = GeminiInteractiveSession(process, master_fd, working_directory)
+            await session.wait_for_ready()
+            return session
+
+        except Exception as e:
+            error_msg = f"Failed to start interactive session: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    async def list_tools(self, working_directory: str = ".") -> str:
+        """Note: /tools is an interactive command, not suitable for MCP servers"""
+        return "Tools listing is an interactive feature. Use send_prompt() for AI interactions."
+
+    async def list_mcp_servers(self, working_directory: str = ".") -> str:
+        """Note: /mcp is an interactive command, not suitable for MCP servers"""
+        return "MCP server listing is an interactive feature. Use send_prompt() for AI interactions."
+
+    async def _ensure_session_started(self, working_directory: str = ".") -> 'GeminiInteractiveSession':
+        """Ensure a persistent session is running, starting it if necessary"""
+        async with self._session_lock:
+            if self._persistent_session is None or not self._persistent_session.is_running():
+                logging.info("Starting new persistent Gemini CLI session")
+                self._persistent_session = await self.start_interactive_session(working_directory=working_directory)
+            return self._persistent_session
+
+    async def send_prompt_to_gemini(self, prompt: str, working_directory: str = ".") -> str:
+        """Send a prompt to Gemini using the persistent session"""
+        try:
+            session = await self._ensure_session_started(working_directory)
+            response = await session.send_prompt(prompt, timeout=60.0)
+            return response if response.strip() else "No response from Gemini"
+        except Exception as e:
+            logger.error(f"Error sending prompt to Gemini: {str(e)}")
+            # If session failed, mark it as None so it gets recreated next time
+            async with self._session_lock:
+                if self._persistent_session is not None:
+                    try:
+                        await self._persistent_session.close()
+                    except Exception:
+                        pass
+                    self._persistent_session = None
+            return f"Error sending prompt: {str(e)}"
+
+    async def get_memory(self, working_directory: str = ".") -> str:
+        """Get the current memory/context from Gemini CLI"""
+        return await self.send_prompt_to_gemini("/memory show", working_directory)
+
+    async def get_stats(self, working_directory: str = ".") -> str:
+        """Get session statistics from Gemini CLI"""
+        return await self.send_prompt_to_gemini("/stats", working_directory)
+
+    async def _execute_session_command(self, command: str, working_directory: str = ".") -> str:
+        """Execute a prompt using the persistent session"""
+        return await self.send_prompt_to_gemini(command, working_directory)
+
+    async def close_persistent_session(self):
+        """Close the persistent session if it exists"""
+        async with self._session_lock:
+            if self._persistent_session is not None:
+                logging.info("Closing persistent Gemini CLI session")
+                try:
+                    await self._persistent_session.close()
+                except Exception as e:
+                    logging.warning(f"Error closing persistent session: {e}")
+                finally:
+                    self._persistent_session = None
+
+    async def get_session(self) -> 'GeminiInteractiveSession':
+        """Get the persistent session, starting it if necessary"""
+        return await self._ensure_session_started()
+
+    async def include_file(self, file_path: str, working_directory: str = ".") -> str:
+        """Include a file in the conversation using @ syntax"""
+        return await self.send_prompt_to_gemini(f"@{file_path}", working_directory)
+
+    async def run_shell_command(self, command: str, working_directory: str = ".") -> str:
+        """Run a shell command using ! syntax"""
+        return await self.send_prompt_to_gemini(f"!{command}", working_directory)
+
+    async def send_prompt_with_p_flag(self, prompt: str, working_directory: str = ".") -> str:
+        """Send a prompt using -p flag for non-interactive execution"""
+        try:
+            logger.debug(f"Sending prompt with -p flag: {prompt[:100]}...")
+
+            # Use the -p flag for non-interactive execution
+            result = await asyncio.create_subprocess_exec(
+                self.gemini_command, '-p', prompt,
+                cwd=working_directory,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=os.environ.copy()
+            )
+
+            stdout, stderr = await result.communicate()
+
+            if result.returncode != 0:
+                error_msg = stderr.decode('utf-8', errors='ignore').strip()
+                logger.error(f"Gemini CLI returned error: {error_msg}")
+                return f"Error: {error_msg}"
+
+            response = stdout.decode('utf-8', errors='ignore').strip()
+            logger.debug(f"Received response length: {len(response)}")
+            return response if response else "No response from Gemini"
+
+        except Exception as e:
+            logger.error(f"Error sending prompt with -p flag: {str(e)}")
+            return f"Error: {str(e)}"
+
+class GeminiInteractiveSession:
+    """Manages an interactive Gemini CLI session with PTY support"""
+
+    def __init__(self, process: asyncio.subprocess.Process, master_fd: int, working_directory: str):
+        self.process = process
+        self.master_fd = master_fd
+        self.working_directory = working_directory
+        self._ready = False
+        self._auth_handled = False  # Track if we've already handled auth in this interaction
+
+    async def wait_for_ready(self, timeout: float = 10.0) -> None:
+        """Wait for the session to be ready for input"""
+        try:
+            # Give the process a moment to start up
+            await asyncio.sleep(2.0)
+
+            # Check if process is still running
+            if self.process.returncode is not None:
+                raise Exception(f"Gemini CLI process terminated during startup: {self.process.returncode}")
+
+            # Try to read any initial output and discard it
+            await self._drain_initial_output()
+
+            self._ready = True
+            logger.info("Gemini PTY session ready")
+        except Exception as e:
+            await self._cleanup()
+            raise Exception(f"Failed to initialize PTY session: {str(e)}")
+
+    async def _drain_initial_output(self) -> None:
+        """Read and discard any initial output from Gemini CLI startup"""
+        try:
+            # Set the master fd to non-blocking mode
+            flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            # Read any available data for a short time
+            for _ in range(10):
+                try:
+                    data = os.read(self.master_fd, 1024)
+                    if data:
+                        chunk = data.decode('utf-8', errors='ignore')
+                        logger.debug(f"Initial output: {repr(chunk[:100])}")
+                    else:
+                        break
+                except OSError:
+                    # No more data available
+                    break
+                await asyncio.sleep(0.1)
+
+            # Set back to blocking mode
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags)
+
+        except Exception as e:
+            logger.debug(f"Error draining initial output: {e}")
+
+    async def send_prompt(self, prompt: str, timeout: float = 60.0) -> str:
+        """Send a prompt to Gemini and get the AI response"""
+        if not self._ready:
+            raise Exception("Session not ready")
+
+        try:
+            logger.debug(f"Sending prompt to Gemini: {prompt[:100]}...")
+
+            # Reset auth handling for this new prompt
+            self._auth_handled = False
+
+            # Send the prompt directly (not a command)
+            prompt_bytes = f"{prompt}\n".encode()
+            os.write(self.master_fd, prompt_bytes)
+
+            # Wait for Gemini's AI response
+            response = await asyncio.wait_for(
+                self._read_ai_response(),
+                timeout
+            )
+
+            logger.debug(f"Received AI response length: {len(response)}")
+            return response.strip()
+
+        except asyncio.TimeoutError:
+            logger.error(f"Prompt timed out: {prompt[:50]}...")
+            raise Exception(f"Prompt timed out after {timeout} seconds")
+        except Exception as e:
+            logger.error(f"Error sending prompt: {str(e)}")
+            raise Exception(f"Error: {str(e)}")
+
+    async def _read_ai_response(self) -> str:
+        """Read Gemini's AI response to a prompt"""
+        buffer = ""
+        start_time = asyncio.get_event_loop().time()
+        ai_content_started = False
+        ai_response_buffer = ""
+
+        # Give Gemini time to process the prompt
+        await asyncio.sleep(2.0)
+
+        logger.debug("Reading AI response...")
+
+        max_wait = 60.0  # 1 minute max
+        last_content_time = start_time
+
+        while asyncio.get_event_loop().time() - start_time < max_wait:
+            try:
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None, self._read_pty_blocking
+                )
+
+                if data:
+                    chunk = data.decode('utf-8', errors='ignore')
+                    buffer += chunk
+                    last_content_time = asyncio.get_event_loop().time()
+
+                    # Check for authentication prompts and handle them
+                    if await self._handle_auth_prompt(buffer):
+                        logger.debug("Auth prompt handled, continuing to read response...")
+                        buffer = ""  # Reset buffer after auth
+                        continue
+
+                    # Look for actual AI response content (not UI elements)
+                    if not ai_content_started:
+                        if self._ai_response_started(buffer):
+                            ai_content_started = True
+                            ai_response_buffer = self._extract_ai_content(buffer)
+                            logger.debug("AI response content detected")
+                    else:
+                        # Continue accumulating AI content
+                        new_content = self._extract_ai_content(chunk)
+                        if new_content:
+                            ai_response_buffer += "\n" + new_content
+
+                    # Check if AI response is complete
+                    if ai_content_started and self._ai_response_complete(buffer):
+                        logger.debug("AI response complete")
+                        break
+
+                else:
+                    # No new data
+                    if ai_content_started:
+                        time_since_content = asyncio.get_event_loop().time() - last_content_time
+                        if time_since_content > 5.0:  # 5 seconds of no new content
+                            logger.debug("No new content for 5 seconds, assuming response complete")
+                            break
+                    await asyncio.sleep(0.5)
+
+            except Exception as e:
+                logger.debug(f"Read error: {e}")
+                await asyncio.sleep(0.5)
+
+        if ai_response_buffer:
+            logger.debug(f"Extracted AI response: {len(ai_response_buffer)} chars")
+            return ai_response_buffer.strip()
+        else:
+            # Fallback to cleaned buffer if no AI content detected
+            logger.debug("No AI content detected, returning cleaned buffer")
+            return self._clean_pty_output(buffer)
+
+    async def _handle_auth_prompt(self, buffer: str) -> bool:
+        """
+        Detect and handle authentication prompts
+        Returns True if auth prompt was handled, False otherwise
+        """
+        # Skip if we've already handled auth for this interaction
+        if self._auth_handled:
+            return False
+
+        auth_indicators = [
+            "allow execution?",
+            "waiting for auth",
+            "press esc to cancel",
+            "yes, allow once",
+            "yes, allow always",
+            "no (esc)"
+        ]
+
+        buffer_lower = buffer.lower()
+
+        # Check if we're seeing an auth prompt
+        if any(indicator in buffer_lower for indicator in auth_indicators):
+            logger.info("Authentication prompt detected, auto-approving...")
+            self._auth_handled = True  # Mark as handled
+
+            # Send "Y" or "1" to approve (typically "Yes, allow once")
+            # Most auth prompts accept "1" for the first option
+            try:
+                auth_response = b'1\n'  # Select option 1 (usually "Yes, allow once")
+                os.write(self.master_fd, auth_response)
+                logger.debug("Sent auth approval response")
+
+                # Give more time for the auth to process and command to execute
+                await asyncio.sleep(4.0)  # Increased from 2.0 to 4.0
+                return True
+
+            except Exception as e:
+                logger.warning(f"Failed to send auth response: {e}")
+                return False
+
+        return False
+
+    def _looks_like_ai_response_complete(self, buffer: str) -> bool:
+        """Check if the AI response appears complete"""
+        if not buffer or len(buffer) < 100:
+            return False
+
+        cleaned = self._clean_pty_output(buffer)
+
+        # Look for indicators that Gemini is ready for the next prompt
+        ready_indicators = [
+            "type your message",
+            "what can i help",
+            "accepting edits",
+            "enter your prompt",
+            "~/repositories",  # Command prompt
+            "gemini-2.5-pro",  # Model indicator in prompt
+        ]
+
+        cleaned_lower = cleaned.lower()
+        lines = cleaned.split('\n')
+
+        # Check the last few lines for ready indicators
+        if len(lines) > 5:
+            last_lines = '\n'.join(lines[-5:]).lower()
+            if any(indicator in last_lines for indicator in ready_indicators):
+                return True
+
+        # Also check if we see the model name and status in recent content
+        # This suggests we're back to the prompt
+        if "gemini-2.5-pro" in cleaned and "error" not in cleaned_lower:
+            return True
+
+        return False
+
+    async def _clear_existing_output(self) -> None:
+        """Clear any existing output in the PTY buffer"""
+        try:
+            # Read and discard any existing data
+            flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            while True:
+                try:
+                    data = os.read(self.master_fd, 4096)
+                    if not data:
+                        break
+                    logger.debug(f"Cleared {len(data)} bytes of existing output")
+                except OSError:
+                    break
+
+            # Restore blocking mode
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags)
+
+        except Exception as e:
+            logger.debug(f"Error clearing output: {e}")
+
+    async def _read_command_output(self) -> str:
+        """Read the output that appears after sending a command"""
+        buffer = ""
+        start_time = asyncio.get_event_loop().time()
+
+        # Give the command a moment to start executing
+        await asyncio.sleep(0.8)
+
+        logger.debug("Reading command output...")
+
+        # Read for a reasonable time, looking for actual command output
+        max_wait = 15.0
+        check_interval = 0.5
+
+        while asyncio.get_event_loop().time() - start_time < max_wait:
+            try:
+                # Try to read new data
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None, self._read_pty_blocking
+                )
+
+                if data:
+                    chunk = data.decode('utf-8', errors='ignore')
+                    buffer += chunk
+                    logger.debug(f"Read {len(chunk)} chars")
+
+                    # Check if this looks like actual command output
+                    if self._looks_like_actual_command_output(buffer, start_time):
+                        logger.debug("Found actual command output")
+                        break
+                else:
+                    # No data - wait a bit and try again
+                    await asyncio.sleep(check_interval)
+
+            except Exception as e:
+                logger.debug(f"Read error: {e}")
+                await asyncio.sleep(check_interval)
+
+        return self._clean_pty_output(buffer)
+
+    def _looks_like_actual_command_output(self, buffer: str, start_time: float) -> bool:
+        """Check if buffer contains actual command output vs startup screen"""
+        if not buffer:
+            return False
+
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        # If we've been reading for a while and have substantial content, probably done
+        if elapsed > 3.0 and len(buffer) > 1000:
+            return True
+
+        cleaned = self._clean_pty_output(buffer)
+
+        # Look for actual command output patterns vs generic startup text
+        command_output_indicators = [
+            "available tools:",
+            "tool:",
+            "mcp server",
+            "command:",
+            "usage:",
+            "help:",
+            "tools:",
+            "memory:",
+            "stats:",
+        ]
+
+        startup_indicators = [
+            "tips for getting started",
+            "ask questions, edit files",
+            "be specific for the best results",
+        ]
+
+        cleaned_lower = cleaned.lower()
+
+        # If we see command output indicators, this is likely real output
+        if any(indicator in cleaned_lower for indicator in command_output_indicators):
+            return True
+
+        # If we only see startup text and it's been a while, we might not be getting command output
+        if any(indicator in cleaned_lower for indicator in startup_indicators) and elapsed > 2.0:
+            return True  # Take what we have
+
+        return False
+
+    def _command_output_complete(self, buffer: str) -> bool:
+        """Check if command output appears complete"""
+        if not buffer:
+            return False
+
+        # Clean the buffer first
+        clean_buffer = self._clean_pty_output(buffer)
+
+        # For meta commands like /tools, /mcp, etc., look for specific completion patterns
+        # These commands typically show lists and then return to prompt
+        if len(clean_buffer.strip()) > 50:  # Reasonable amount of output
+            lines = clean_buffer.split('\n')
+            if len(lines) > 3:  # Multiple lines of output
+                # Check if we see a prompt or completion at the end
+                last_lines = ' '.join(lines[-2:]).lower()
+                if any(indicator in last_lines for indicator in [
+                    'type your message',
+                    'enter your prompt',
+                    'what can i help',
+                    'ctrl+',  # Control key hints
+                    '>'  # Prompt character
+                ]):
+                    return True
+
+        return False
+
+    def _looks_like_prompt_ready(self, buffer: str) -> bool:
+        """Check if the buffer contains indicators that we're back at a ready prompt"""
+        if not buffer:
+            return False
+
+        # Look for common prompt indicators (without colors)
+        clean_buffer = self._clean_pty_output(buffer).lower()
+
+        # Check for Gemini CLI prompt indicators
+        prompt_indicators = [
+            "type your message",
+            "enter your prompt",
+            "what can i help",
+            "waiting for input",
+            "> ",  # Common prompt character
+        ]
+
+        # Also check if we see the command echo followed by output
+        lines = clean_buffer.split('\n')
+        if len(lines) > 5:  # If we have multiple lines, might be complete
+            last_few_lines = ' '.join(lines[-3:]).strip()
+            if any(indicator in last_few_lines for indicator in prompt_indicators):
+                return True
+
+        return False
+
+    def _clean_pty_output(self, text: str) -> str:
+        """Clean up PTY output by removing ANSI codes, loading bars, etc."""
+        import re
+
+        # Remove ANSI escape sequences (colors, cursor movements, etc.)
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        text = ansi_escape.sub('', text)
+
+        # Remove common loading/progress indicators
+        progress_patterns = [
+            r'░+',  # Block characters used in progress bars
+            r'▓+',  # Block characters
+            r'█+',  # Block characters
+            r'[▏▎▍▌▋▊▉█]+',  # Progress bar characters
+            r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+',  # Spinner characters
+            r'\s*\.\.\.\s*',  # Loading dots
+            r'\s*Loading.*?\n',  # Loading messages
+            r'\s*Initializing.*?\n',  # Initialization messages
+        ]
+
+        for pattern in progress_patterns:
+            text = re.sub(pattern, '', text, flags=re.MULTILINE)
+
+        # Clean up excessive whitespace
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Multiple empty lines
+        text = re.sub(r'[ \t]+\n', '\n', text)  # Trailing spaces
+        text = re.sub(r'\n+$', '', text)  # Trailing newlines
+        text = re.sub(r'^\n+', '', text)  # Leading newlines
+
+        return text.strip()
+
+    def _read_pty_blocking(self) -> bytes:
+        """Blocking read from PTY with timeout"""
+        try:
+            # Set non-blocking mode temporarily to check for data
+            flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            try:
+                data = os.read(self.master_fd, 4096)
+                return data
+            except OSError:
+                return b''
+            finally:
+                # Restore original flags
+                fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags)
+        except Exception:
+            return b''
+
+    def _looks_like_command_complete(self, buffer: str) -> bool:
+        """Check if the command response looks complete"""
+        if not buffer or len(buffer.strip()) < 20:
+            return False
+
+        # Clean the buffer to check content
+        cleaned = self._clean_pty_output(buffer)
+        lines = cleaned.split('\n')
+
+        # Look for signs that we're back to a prompt or the command finished
+        # For /tools, /mcp commands, we expect to see structured output
+        if len(lines) > 3:  # Multiple lines suggest actual output
+            last_lines = '\n'.join(lines[-3:]).lower()
+
+            # Check for completion indicators
+            if any(indicator in last_lines for indicator in [
+                'type your message',
+                'ctrl+t to view',
+                'accepting edits',
+                'what can i help',
+                '>',  # Prompt indicator
+            ]):
+                return True
+
+        return False
+
+    def is_running(self) -> bool:
+        """Check if the session is still running"""
+        return self._ready and self.process.returncode is None
+
+    def _read_pty_nonblocking(self) -> bytes:
+        """Non-blocking read from PTY"""
+        try:
+            return os.read(self.master_fd, 1024)
+        except OSError:
+            return b""
+
+    async def save_memory(self, text: str) -> str:
+        """Save something to memory - Note: /memory commands are interactive"""
+        if not text.strip():
+            raise Exception("Empty text to save")
+        return await self.send_prompt(f"Please remember this: {text}")
+
+    async def get_tools(self) -> str:
+        """Note: /tools is interactive - ask Gemini about available tools instead"""
+        return await self.send_prompt("What tools do you have available?")
+
+    async def get_memory(self) -> str:
+        """Note: /memory is interactive - ask Gemini about memory instead"""
+        return await self.send_prompt("What do you remember from our conversation?")
+
+    async def get_stats(self) -> str:
+        """Note: /stats is interactive - ask Gemini for session info instead"""
+        return await self.send_prompt("Can you tell me about this session?")
+
+    async def compress_context(self) -> str:
+        """Note: /compress is interactive - ask Gemini to summarize instead"""
+        return await self.send_prompt("Please summarize our conversation so far.")
+
+    async def _cleanup(self) -> None:
+        """Clean up the PTY and process"""
+        try:
+            if self.master_fd:
+                os.close(self.master_fd)
+        except Exception:
+            pass
+
+        if self.process and self.process.returncode is None:
+            try:
+                self.process.terminate()
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except Exception:
+                self.process.kill()
+                await self.process.wait()
+
+    async def close(self) -> None:
+        """Close the interactive session"""
+        self._ready = False
+        try:
+            if self.process.returncode is None:
+                logger.debug("Attempting to close PTY session gracefully")
+
+                # Try to send quit commands
+                for close_command in ["/quit", "/exit"]:
+                    try:
+                        command_bytes = f"{close_command}\n".encode()
+                        os.write(self.master_fd, command_bytes)
+
+                        # Give it time to respond
+                        await asyncio.sleep(1.0)
+
+                        if self.process.returncode is not None:
+                            logger.debug(f"Session closed gracefully with '{close_command}'")
+                            return
+                    except Exception:
+                        continue
+
+                # If quit commands didn't work, send Ctrl+C
+                logger.debug("Quit commands failed, sending Ctrl+C")
+                try:
+                    os.write(self.master_fd, b'\x03')  # Ctrl+C
+                    await asyncio.sleep(1.0)
+
+                    if self.process.returncode is not None:
+                        logger.debug("Session closed with Ctrl+C")
+                        return
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.warning(f"Error during graceful close: {e}")
+        finally:
+            await self._cleanup()
+
+    def _ai_response_started(self, buffer: str) -> bool:
+        """Check if AI response content has started (not just UI elements)"""
+        clean_buffer = self._clean_pty_output(buffer).strip()
+
+        # Skip if it's just UI elements or help text
+        ui_indicators = [
+            "tips for getting started",
+            "type your message",
+            "using 20 mcp servers",
+            "ctrl+t to view",
+            "accepting edits",
+            "~/repositories",
+            "gemini-2.5-pro",
+            "no sandbox",
+            "context left",
+            "ask questions, edit files",
+            "be specific for the best results",
+            "create gemini.md files",
+            "/help for more information"
+        ]
+
+        clean_lower = clean_buffer.lower()
+
+        # If we only see UI indicators, AI hasn't started responding yet
+        for indicator in ui_indicators:
+            if indicator in clean_lower:
+                # Check if there's substantial content beyond UI
+                lines = clean_buffer.split('\n')
+                content_lines = [line.strip() for line in lines if line.strip()]
+                non_ui_lines = []
+
+                for line in content_lines:
+                    line_lower = line.lower()
+                    is_ui = any(ui_ind in line_lower for ui_ind in ui_indicators)
+                    if not is_ui and len(line) > 5:  # Substantial content
+                        non_ui_lines.append(line)
+
+                # AI content started if we have significant non-UI content
+                return len(non_ui_lines) >= 2 or (len(non_ui_lines) == 1 and len(non_ui_lines[0]) > 20)
+
+        # If no UI indicators and we have content, likely AI response
+        return len(clean_buffer) > 10
+
+    def _extract_ai_content(self, buffer: str) -> str:
+        """Extract actual AI content, filtering out UI elements"""
+        clean_buffer = self._clean_pty_output(buffer)
+        lines = clean_buffer.split('\n')
+
+        ui_patterns = [
+            r'tips for getting started',
+            r'type your message',
+            r'using \d+ mcp servers',
+            r'ctrl\+\w+',
+            r'accepting edits',
+            r'~/repositories',
+            r'gemini-2\.5-pro',
+            r'no sandbox',
+            r'context left',
+            r'╭─+╮',
+            r'│.*│',
+            r'╰─+╯',
+            r'^\s*>\s*$',
+            r'^\s*\|\s*$'
+        ]
+
+        content_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Skip lines that match UI patterns
+            is_ui = False
+            for pattern in ui_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    is_ui = True
+                    break
+
+            if not is_ui:
+                content_lines.append(line)
+
+        return '\n'.join(content_lines)
+
+    def _ai_response_complete(self, buffer: str) -> bool:
+        """Check if AI response is complete by looking for the return to prompt"""
+        clean_buffer = self._clean_pty_output(buffer).lower()
+
+        # Look for indicators that we're back to the input prompt
+        completion_indicators = [
+            "type your message",
+            "accepting edits",
+            "gemini-2.5-pro",
+            "context left"
+        ]
+
+        # Check the last few lines for completion indicators
+        lines = clean_buffer.split('\n')
+        if len(lines) >= 3:
+            last_lines = '\n'.join(lines[-3:])
+            return any(indicator in last_lines for indicator in completion_indicators)
+
+        return False

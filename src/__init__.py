@@ -9,6 +9,6 @@ __version__ = "0.1.0"
 __author__ = "AI Workspace"
 __email__ = "workspace@example.com"
 
-from .main import GeminiCLIServer, main
+from .main import GeminiCLIMCPServer, main
 
-__all__ = ["main", "GeminiCLIServer"]
+__all__ = ["main", "GeminiCLIMCPServer"]

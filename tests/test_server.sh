@@ -1,8 +1,6 @@
 #!/bin/bash
-"""
-Test script for the Gemini CLI MCP Server
-This script verifies that the server can properly connect to gemini-cli
-"""
+# Test script for the Gemini CLI MCP Server
+# This script verifies that the server can properly connect to gemini-cli
 
 set -e
 
