@@ -1,162 +1,157 @@
-# Troubleshooting Guide
+# Gemini CLI MCP Server Troubleshooting
 
 ## Common Issues and Solutions
 
-### 1. Server Won't Start
+### 1. "gemini command not found in PATH"
 
-**Problem**: MCP server fails to initialize
-**Solutions**:
-- Check Python version (3.10+ required)
-- Verify virtual environment is activated
-- Ensure all dependencies are installed: `uv add mcp`
-- Check for port conflicts
+**Problem**: The MCP server can't find the gemini-cli command.
 
-**Diagnostic Commands**:
-```bash
-python --version
-which python
-pip list | grep mcp
-```
+**Solutions:**
+- Install gemini-cli: `npm install -g @google-ai/gemini-cli`
+- Check PATH: `which gemini` should return a path
+- Restart terminal after installation
+- Ensure npm global bin is in PATH
 
-### 2. Authentication Errors
+### 2. Authentication Issues
 
-**Problem**: Gemini API authentication fails
-**Solutions**:
-- Verify GEMINI_API_KEY environment variable is set
-- Check API key validity at Google AI Studio
-- Ensure proper permissions for the API key
-- Try re-generating the API key
+**Problem**: Gemini CLI reports authentication errors.
 
-**Diagnostic Commands**:
-```bash
-echo $GEMINI_API_KEY
-curl -H "Authorization: Bearer $GEMINI_API_KEY" https://generativelanguage.googleapis.com/v1/models
-```
+**Solutions:**
+- Run `gemini` manually first to authenticate
+- Check environment variables (GEMINI_API_KEY, GOOGLE_CLOUD_PROJECT, etc.)
+- Re-authenticate: `gemini /auth` to change auth method
+- For API key: Set GEMINI_API_KEY environment variable
+- For OAuth: Complete browser login flow outside MCP
 
-### 3. Node.js/Gemini CLI Issues
+### 3. Session Won't Start
 
-**Problem**: Gemini CLI not found or fails to execute
-**Solutions**:
-- Install Node.js 18+ 
-- Verify npx is available
-- Test Gemini CLI directly: `npx https://github.com/google-gemini/gemini-cli --version`
-- Check network connectivity
+**Problem**: `gemini_start_session` fails or times out.
 
-### 4. Permission Errors
+**Solutions:**
+- Verify gemini works manually: `gemini --version`
+- Check starting directory exists and is accessible
+- Try without auto_approve first
+- Check logs in Claude Desktop for specific errors
+- Restart Claude Desktop to clear any stuck processes
 
-**Problem**: File access or directory permission errors
-**Solutions**:
-- Verify working directory permissions
-- Use absolute paths when possible
-- Check file/directory ownership
-- Ensure proper read/write permissions
+### 4. Tasks Get Stuck "RUNNING"
 
-### 5. Timeout Issues
+**Problem**: Tasks never complete, stuck in RUNNING status.
 
-**Problem**: Operations timeout or hang
-**Solutions**:
-- Increase timeout values in configuration
-- Check network connectivity
-- Verify API quota and rate limits
-- Break large operations into smaller chunks
+**Solutions:**
+- Check if task needs interactive input (status will show BLOCKED_ON_INTERACTION)
+- Some analysis tasks can take 10+ minutes - be patient
+- For very long tasks, gemini may need user approval for tool executions
+- Try setting auto_approve=false and respond to prompts manually
+
+### 5. "Session not ready" or "Session no longer alive"
+
+**Problem**: Session dies unexpectedly or never becomes ready.
+
+**Solutions:**
+- Wait 30-60 seconds after starting session before sending messages
+- Check if gemini process crashed (look at stderr logs)
+- Restart session with new session_id
+- Verify directory permissions for starting_directory
+- Try starting in home directory first
+
+### 6. Interactive Prompts Not Working
+
+**Problem**: Can't respond to BLOCKED_ON_INTERACTION tasks.
+
+**Solutions:**
+- Use exact response expected (usually "y", "n", or specific text)
+- Check the prompt text in the status response for guidance
+- Some prompts may timeout - restart task if needed
+- Try responding through the gemini CLI directly first to understand expected responses
+
+### 7. File Access Issues with @-syntax
+
+**Problem**: `@file-path` doesn't work or files not found.
+
+**Solutions:**
+- Use absolute paths: `@/full/path/to/file`
+- Check file permissions and existence
+- Ensure gemini is running in correct directory
+- Use `@./relative-path` for relative paths from working directory
+- For directories, use `@directory/` with trailing slash
+
+### 8. High Memory Usage or Process Leaks
+
+**Problem**: Multiple gemini processes accumulating.
+
+**Solutions:**
+- Always close sessions when done: `gemini_close_session`
+- Restart Claude Desktop periodically
+- Check for zombie processes: `ps aux | grep gemini`
+- Kill stuck processes manually if needed: `pkill -f gemini`
+
+### 9. MCP Server Won't Start
+
+**Problem**: Server fails to start in Claude Desktop.
+
+**Solutions:**
+- Check Claude Desktop logs: `~/Library/Logs/Claude/mcp*.log`
+- Verify uv is installed and working: `which uv`
+- Check file paths in config are correct
+- Ensure Python dependencies are installed: `uv sync`
+- Try running server manually: `uv run python src/main.py`
+
+### 10. Slow Response Times
+
+**Problem**: Tasks take very long to complete.
+
+**Solutions:**
+- Large file analysis inherently takes time
+- Break large tasks into smaller chunks
+- Use gemini-cli commands like `/compress` to reduce context
+- Consider using non-interactive mode for simple queries
+- Check internet connection for API calls
 
 ## Debugging Steps
 
-### 1. Enable Debug Logging
-Set environment variable:
-```bash
-export LOG_LEVEL=DEBUG
-```
+1. **Test gemini-cli directly**:
+   ```bash
+   gemini --version
+   gemini -p "Hello, test message"
+   ```
 
-### 2. Test Components Individually
+2. **Check MCP server logs**:
+   ```bash
+   tail -f ~/Library/Logs/Claude/mcp*.log
+   ```
 
-**Test Gemini CLI**:
-```bash
-npx https://github.com/google-gemini/gemini-cli --help
-```
+3. **Test with simple session**:
+   ```json
+   {"session_id": "test", "starting_directory": "~"}
+   ```
 
-**Test MCP Server**:
-```bash
-python src/main.py
-```
+4. **Verify environment**:
+   ```bash
+   echo $GEMINI_API_KEY
+   which gemini
+   which uv
+   ```
 
-**Test with MCP Inspector**:
-```bash
-npx @modelcontextprotocol/inspector uv --directory . run python src/main.py
-```
-
-### 3. Check System Requirements
-
-- Python 3.10+
-- Node.js 18+
-- Active internet connection
-- Valid Gemini API key
-- Sufficient disk space
-
-### 4. Verify Configuration
-
-Check your Claude Desktop config:
-```json
-{
-  "mcpServers": {
-    "gemini-cli": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/gemini-cli-mcp-server", "run", "python", "src/main.py"],
-      "env": {
-        "GEMINI_API_KEY": "your_key_here"
-      }
-    }
-  }
-}
-```
+5. **Manual server test**:
+   ```bash
+   cd /path/to/gemini-cli-mcp-server
+   uv run python src/main.py
+   ```
 
 ## Getting Help
 
-### Log Information to Collect
-- Error messages from stderr
-- Full stack traces
-- Configuration files (with sensitive data removed)
-- System information (OS, Python version, Node.js version)
+If issues persist:
 
-### Useful Commands for Diagnostics
-```bash
-# System info
-python --version
-node --version
-uv --version
+1. Check server logs for specific error messages
+2. Try running gemini-cli manually to isolate issues
+3. Verify all prerequisites are met
+4. Test with minimal configuration first
+5. Check for conflicting processes or versions
 
-# Check installation
-pip list | grep mcp
-npm list -g
+## Configuration Notes
 
-# Test connectivity
-ping google.com
-curl -I https://generativelanguage.googleapis.com
-
-# Check permissions
-ls -la /path/to/project
-whoami
-id
-```
-
-### Support Resources
-- [Gemini CLI GitHub Issues](https://github.com/google-gemini/gemini-cli/issues)
-- [MCP Documentation](https://modelcontextprotocol.io/)
-- [Google AI Studio Support](https://aistudio.google.com/)
-
-## Performance Optimization
-
-### Memory Usage
-- Monitor memory consumption during large operations
-- Use streaming for large file processing
-- Implement pagination for bulk operations
-
-### Network Optimization
-- Cache API responses when appropriate
-- Batch similar requests
-- Implement retry logic with exponential backoff
-
-### File System Optimization
-- Use absolute paths to avoid ambiguity
-- Implement proper file locking for concurrent access
-- Clean up temporary files regularly
+- Timeout is set to 60 seconds - increase for very slow systems
+- trust=false is recommended for security
+- LOG_LEVEL=INFO provides good debugging information
+- Set LOG_LEVEL=DEBUG for more verbose output

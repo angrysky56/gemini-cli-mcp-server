@@ -4,7 +4,7 @@
       "command": "uv",
       "args": [
         "--directory",
-        "/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server",
+        "/path/to/gemini-cli-mcp-server",
         "run",
         "python",
         "src/main.py"

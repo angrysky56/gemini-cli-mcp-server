@@ -1,0 +1,16 @@
+{
+  "autoAccept": true,
+  "coreTools": [
+    "ReadFileTool",
+    "WriteFileTool",
+    "EditTool",
+    "ReadManyFilesTool",
+    "FindFilesTool",
+    "SearchTextTool",
+    "ReadFolderTool",
+    "ShellTool",
+    "GoogleSearchTool",
+    "WebFetchTool",
+    "SaveMemoryTool"
+  ]
+}

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Proper Gemini CLI MCP Server
+Gemini CLI MCP Server
 
-An MCP server that provides access to the actual gemini-cli binary,
-leveraging all its built-in tools and capabilities.
+A simple MCP server that provides access to the user's pre-authenticated gemini-cli.
+The user must already have gemini-cli installed and authenticated.
 """
 
 import asyncio
@@ -14,7 +14,6 @@ import signal
 import subprocess
 import sys
 import uuid
-from collections.abc import Coroutine
 from typing import Any
 
 import mcp.server.stdio
@@ -34,20 +33,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Global cleanup for graceful shutdown
+# Global cleanup handlers
 def signal_handler(signum: int, frame: Any) -> None:
-    """Handle shutdown signals"""
+    """Handle shutdown signals gracefully"""
     logger.info(f"Received signal {signum}, shutting down gracefully")
     sys.exit(0)
 
 
-# Register cleanup handlers
+# Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 
 def find_gemini_command() -> str:
-    """Find the gemini command path using 'which'"""
+    """Find the gemini command in PATH"""
     try:
         result = subprocess.run(
             ["which", "gemini"],
@@ -58,71 +57,37 @@ def find_gemini_command() -> str:
         path = result.stdout.strip()
         if not path:
             raise Exception("which gemini returned empty path")
-        return path
+        logger.info(f"Found gemini command at: {path}")
+        return "gemini"  # Use the command name, not the full path
     except subprocess.CalledProcessError:
-        raise Exception("gemini command not found in PATH")
-    except Exception as e:
-        raise Exception(f"Failed to find gemini command: {str(e)}")
+        raise Exception("gemini command not found in PATH. Please install and authenticate gemini-cli first.")
 
 
 class GeminiCLIMCPServer:
-    """MCP Server that wraps the actual Gemini CLI with persistent session"""
+    """MCP Server for Gemini CLI"""
 
     def __init__(self) -> None:
         self.server = Server("gemini-cli-mcp-server")
-        self.interactive_sessions: dict[str, GeminiInteractiveSession] = {}
-        self.session_metadata: dict[str, dict[str, Any]] = {}
+        self.sessions: dict[str, GeminiInteractiveSession] = {}
         self.background_tasks: dict[str, dict[str, Any]] = {}
 
+        # Verify gemini is available
         try:
-            gemini_cli_path = find_gemini_command()
-            self.gemini_cli = GeminiCLIWrapper(gemini_cli_path)
-            logger.info(f"Gemini CLI wrapper initialized successfully (path: {gemini_cli_path})")
+            gemini_command = find_gemini_command()
+            self.gemini_cli = GeminiCLIWrapper(gemini_command)
+            logger.info("Gemini CLI wrapper initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize Gemini CLI wrapper: {str(e)}")
+            logger.error(f"Failed to initialize Gemini CLI wrapper: {e}")
             raise
+
         self._setup_handlers()
-
-    async def cleanup(self) -> None:
-        """Clean up resources when shutting down"""
-        logger.info("Cleaning up active sessions and tasks...")
-        for task in self.background_tasks.values():
-            if task.get('task') and not task['task'].done():
-                task['task'].cancel()
-        for session in self.interactive_sessions.values():
-            await session.close()
-
-    def _estimate_task(self, message: str) -> tuple[str, str]:
-        """Estimates the complexity and duration of a task based on the prompt."""
-        message_lower = message.lower()
-        is_long_task = False
-
-        # Complex, long-running tasks
-        complex_keywords = ["analyze", "refactor", "implement", "write a program", "create a script", "summarize this book"]
-        if any(keyword in message_lower for keyword in complex_keywords) or len(message) > 1000:
-            estimate = "10-30+ minutes"
-            is_long_task = True
-        # Medium tasks involving I/O
-        elif '@' in message or '!' in message:
-            estimate = "1-5 minutes"
-        # Simple, quick commands
-        elif message.strip() in ["/stats", "/memory show", "/tools"]:
-            estimate = "~5-10 seconds"
-        else:
-            estimate = "~1-2 minutes"
-
-        note = f"Please use gemini_check_task_status with the returned task_id to get the result. Recommended check time is in {estimate}."
-        if is_long_task:
-            note += " IMPORTANT: This is a long-running task. Do not close the chat or client connection, as it will terminate the process."
-
-        return estimate, note
 
     def _setup_handlers(self) -> None:
         """Set up all MCP request handlers"""
 
         @self.server.list_tools()
         async def handle_list_tools() -> list[types.Tool]:
-            """List available Gemini CLI tools"""
+            """List available tools"""
             return [
                 types.Tool(
                     name="gemini_start_session",
@@ -130,9 +95,20 @@ class GeminiCLIMCPServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "session_id": {"type": "string", "description": "Unique identifier for this session"},
-                            "starting_directory": {"type": "string", "description": "Optional: The directory to start the Gemini CLI session in. Defaults to the user's home directory."},
-                            "auto_approve": {"type": "boolean", "description": "Optional: Auto-approve tool executions. Defaults to true for MCP usage."}
+                            "session_id": {
+                                "type": "string",
+                                "description": "Unique identifier for this session"
+                            },
+                            "starting_directory": {
+                                "type": "string",
+                                "description": "Optional: The directory to start the Gemini CLI session in. Defaults to the user's home directory.",
+                                "default": "~"
+                            },
+                            "auto_approve": {
+                                "type": "boolean",
+                                "description": "Optional: Auto-approve tool executions. Defaults to true for MCP usage.",
+                                "default": True
+                            }
                         },
                         "required": ["session_id"]
                     }
@@ -143,8 +119,14 @@ class GeminiCLIMCPServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "session_id": {"type": "string", "description": "Session identifier"},
-                            "message": {"type": "string", "description": "Message/prompt to send to the session"}
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session identifier"
+                            },
+                            "message": {
+                                "type": "string",
+                                "description": "Message/prompt to send to the session"
+                            }
                         },
                         "required": ["session_id", "message"]
                     }
@@ -155,7 +137,10 @@ class GeminiCLIMCPServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "string", "description": "The ID of the task to check"}
+                            "task_id": {
+                                "type": "string",
+                                "description": "The ID of the task to check"
+                            }
                         },
                         "required": ["task_id"]
                     }
@@ -166,8 +151,14 @@ class GeminiCLIMCPServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "string", "description": "The ID of the blocked task."},
-                            "response_text": {"type": "string", "description": "The text to send as a response to the prompt."}
+                            "task_id": {
+                                "type": "string",
+                                "description": "The ID of the blocked task"
+                            },
+                            "response_text": {
+                                "type": "string",
+                                "description": "The text to send as a response to the prompt"
+                            }
                         },
                         "required": ["task_id", "response_text"]
                     }
@@ -178,7 +169,10 @@ class GeminiCLIMCPServer:
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "session_id": {"type": "string", "description": "Session identifier"}
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session identifier"
+                            }
                         },
                         "required": ["session_id"]
                     }
@@ -190,13 +184,13 @@ class GeminiCLIMCPServer:
             """Handle tool execution requests"""
             try:
                 if name == "gemini_start_session":
-                    result = await self._start_interactive_session(arguments)
+                    result = await self._start_session(arguments)
                 elif name == "gemini_session_chat":
                     result = await self._session_chat(arguments)
                 elif name == "gemini_check_task_status":
                     result = await self._check_task_status(arguments)
                 elif name == "gemini_session_respond_to_interaction":
-                    result = await self._session_respond_to_interaction(arguments)
+                    result = await self._respond_to_interaction(arguments)
                 elif name == "gemini_close_session":
                     result = await self._close_session(arguments)
                 else:
@@ -209,156 +203,279 @@ class GeminiCLIMCPServer:
                 logger.error(error_msg, exc_info=True)
                 return [types.TextContent(type="text", text=error_msg)]
 
-    async def _run_and_monitor_task(self, task_id: str, coro: Coroutine):
-        """Wrapper to run a coroutine and store its result, handling interactive prompts."""
+    async def _start_session(self, arguments: dict[str, Any]) -> str:
+        """Start a new Gemini CLI session"""
+        session_id = arguments["session_id"]
+        starting_directory = arguments.get("starting_directory", os.path.expanduser("~"))
+        auto_approve = arguments.get("auto_approve", True)
+
+        # Clean up any dead sessions first
+        await self._cleanup_dead_sessions()
+
+        if session_id in self.sessions:
+            return f"Error: Session {session_id} already exists"
+
         try:
-            result = await coro
-            self.background_tasks[task_id]['status'] = 'COMPLETE'
+            # Build command - just use basic gemini with auto-approve if requested
+            cmd_parts = ["gemini"]
+            if auto_approve:
+                cmd_parts.append("--yolo")
+
+            # Create and start the session
+            session = GeminiInteractiveSession(
+                cmd_parts=cmd_parts,
+                working_directory=starting_directory,
+                auto_approve=auto_approve
+            )
+
+            # Start the session
+            await session.start()
+
+            # Store the session
+            self.sessions[session_id] = session
+
+            logger.info(f"Started session {session_id} in {starting_directory}")
+            return f"Session {session_id} started successfully in {starting_directory}"
+
+        except Exception as e:
+            logger.error(f"Failed to start session {session_id}: {e}")
+            return f"Error: Failed to start session {session_id}: {str(e)}"
+
+    async def _session_chat(self, arguments: dict[str, Any]) -> str:
+        """Send a message to a session (async)"""
+        session_id = arguments["session_id"]
+        message = arguments["message"]
+
+        # Validate session exists
+        if session_id not in self.sessions:
+            return f"Error: Session {session_id} not found"
+
+        session = self.sessions[session_id]
+        if not session.is_running():
+            await self._cleanup_dead_sessions()
+            return f"Error: Session {session_id} is no longer active"
+
+        # Start background task
+        task_id = str(uuid.uuid4())
+
+        try:
+            # Estimate completion time
+            estimate = self._estimate_task_time(message)
+
+            # Create the background task
+            task = asyncio.create_task(self._execute_chat_task(task_id, session, message))
+
+            self.background_tasks[task_id] = {
+                'status': 'RUNNING',
+                'task': task,
+                'session_id': session_id,
+                'estimate': estimate
+            }
+
+            return json.dumps({
+                "status": "STARTED",
+                "task_id": task_id,
+                "estimated_completion": estimate,
+                "message": f"Task started. Check status with gemini_check_task_status using task_id: {task_id}"
+            }, indent=2)
+
+        except Exception as e:
+            logger.error(f"Error starting chat task: {e}")
+            return f"Error: Failed to start chat task: {str(e)}"
+
+    async def _execute_chat_task(self, task_id: str, session: GeminiInteractiveSession, message: str) -> None:
+        """Execute a chat task in the background"""
+        try:
+            logger.info(f"Executing task {task_id}: {message[:50]}...")
+            result = await session.send_prompt(message)
+
+            # Task completed successfully
+            self.background_tasks[task_id]['status'] = 'COMPLETED'
             self.background_tasks[task_id]['result'] = result
+            logger.info(f"Task {task_id} completed successfully")
+
         except InteractivePromptDetected as e:
-            logger.info(f"Task {task_id} blocked on interactive prompt: {e.prompt_text}")
+            # Task blocked on user interaction
+            logger.info(f"Task {task_id} blocked on interaction: {e.prompt_text}")
             self.background_tasks[task_id]['status'] = 'BLOCKED_ON_INTERACTION'
             self.background_tasks[task_id]['prompt'] = e.prompt_text
+
         except Exception as e:
+            # Task failed
             logger.error(f"Task {task_id} failed: {e}")
             self.background_tasks[task_id]['status'] = 'ERROR'
             self.background_tasks[task_id]['result'] = str(e)
 
-    async def _start_background_task(self, session_id: str, coro: Coroutine, message: str) -> str:
-        """Starts a background task and returns its ID with an estimated time."""
-        await self._get_session(session_id)
-        task_id = str(uuid.uuid4())
+    def _estimate_task_time(self, message: str) -> str:
+        """Estimate how long a task might take"""
+        message_lower = message.lower()
 
-        estimated_completion, note = self._estimate_task(message)
+        # Quick commands
+        if message.strip().startswith('/'):
+            return "5-10 seconds"
 
-        task = asyncio.create_task(self._run_and_monitor_task(task_id, coro))
-        self.background_tasks[task_id] = {
-            'status': 'RUNNING',
-            'task': task,
-            'session_id': session_id # Store session_id for responding to interaction
-        }
+        # File operations with @
+        if '@' in message:
+            return "30 seconds - 2 minutes"
 
-        response = {
-            "status": "STARTED",
-            "task_id": task_id,
-            "estimated_completion": estimated_completion,
-            "note": note
-        }
-        return json.dumps(response, indent=2)
+        # Complex requests
+        complex_keywords = ["analyze", "refactor", "implement", "create", "write", "generate"]
+        if any(keyword in message_lower for keyword in complex_keywords) or len(message) > 500:
+            return "2-10 minutes"
 
-    async def _session_chat(self, arguments: dict[str, Any]) -> str:
-        """Send a message to an interactive session as a background task."""
-        session_id = arguments["session_id"]
-        message = arguments["message"]
-        session = await self._get_session(session_id)
-        return await self._start_background_task(session_id, session.send_prompt(message), message)
+        # Default
+        return "30-60 seconds"
 
     async def _check_task_status(self, arguments: dict[str, Any]) -> str:
-        """Checks the status of a background task."""
+        """Check the status of a background task"""
         task_id = arguments["task_id"]
-        task_info = self.background_tasks.get(task_id)
 
-        if not task_info:
-            return json.dumps({"status": "NOT_FOUND"})
+        if task_id not in self.background_tasks:
+            return json.dumps({"status": "NOT_FOUND", "message": f"Task {task_id} not found"})
 
+        task_info = self.background_tasks[task_id]
         status = task_info["status"]
+
         if status == 'RUNNING':
-            return json.dumps({"status": "RUNNING"})
+            return json.dumps({
+                "status": "RUNNING",
+                "estimated_completion": task_info.get('estimate', 'Unknown'),
+                "message": "Task is still running. Check again later."
+            })
+
         elif status == 'BLOCKED_ON_INTERACTION':
             return json.dumps({
                 "status": "BLOCKED_ON_INTERACTION",
-                "prompt": task_info.get('prompt', 'No prompt text available.')
+                "prompt": task_info.get('prompt', 'Unknown prompt'),
+                "message": "Task is waiting for user input. Use gemini_session_respond_to_interaction to respond."
             }, indent=2)
-        else:
-            result = task_info.get('result', 'No result found.')
-            del self.background_tasks[task_id]
-            return json.dumps({"status": status, "result": result}, indent=2)
 
-    async def _session_respond_to_interaction(self, arguments: dict[str, Any]) -> str:
-        """Responds to an interactive prompt in a blocked session."""
+        elif status == 'COMPLETED':
+            result = task_info.get('result', 'No result available')
+            # Clean up completed task
+            del self.background_tasks[task_id]
+            return json.dumps({
+                "status": "COMPLETED",
+                "result": result
+            }, indent=2)
+
+        elif status == 'ERROR':
+            error = task_info.get('result', 'Unknown error')
+            # Clean up failed task
+            del self.background_tasks[task_id]
+            return json.dumps({
+                "status": "ERROR",
+                "error": error
+            }, indent=2)
+
+        return json.dumps({"status": "UNKNOWN"})
+
+    async def _respond_to_interaction(self, arguments: dict[str, Any]) -> str:
+        """Respond to an interactive prompt"""
         task_id = arguments["task_id"]
         response_text = arguments["response_text"]
-        task_info = self.background_tasks.get(task_id)
 
-        if not task_info:
-            return f"Error: Task {task_id} not found."
+        if task_id not in self.background_tasks:
+            return f"Error: Task {task_id} not found"
+
+        task_info = self.background_tasks[task_id]
+
         if task_info['status'] != 'BLOCKED_ON_INTERACTION':
-            return f"Error: Task {task_id} is not blocked on interaction. Current status: {task_info['status']}"
+            return f"Error: Task {task_id} is not blocked on interaction (status: {task_info['status']})"
 
         session_id = task_info.get('session_id')
-        if not session_id:
-            return f"Error: Could not find session_id for task {task_id}."
+        if not session_id or session_id not in self.sessions:
+            return f"Error: Session for task {task_id} not found"
 
-        session = await self._get_session(session_id)
+        session = self.sessions[session_id]
 
-        # Send the response to the child process
-        if session.child is None:
-            return f"Error: Session child process is not available for session {session_id}."
-        await asyncio.get_event_loop().run_in_executor(
-            None, session.child.sendline, response_text
-        )
-
-        # Reset task status to RUNNING and restart monitoring
-        task_info['status'] = 'RUNNING'
-        # Re-start monitoring the task by calling send_prompt with an empty string
-        # This will cause _read_response to continue reading from the child process
-        task_info['task'] = asyncio.create_task(self._run_and_monitor_task(task_id, session.send_prompt("")))
-        del task_info['prompt'] # Clear the prompt text
-
-        return f"Response '{response_text}' sent to task {task_id}. Task is now RUNNING."
-
-    async def _start_interactive_session(self, arguments: dict[str, Any]) -> str:
-        """Start an interactive Gemini CLI session"""
-        session_id = arguments["session_id"]
-        starting_directory = arguments.get("starting_directory", os.path.expanduser("~"))
-        await self._cleanup_dead_sessions()
-        if session_id in self.interactive_sessions:
-            return f"Session {session_id} already exists"
         try:
-            session = await self.gemini_cli.start_interactive_session(
-                working_directory=starting_directory, # Pass working_directory
-                model=arguments.get("model"), # Pass model
-                debug=arguments.get("debug", False), # Pass debug
-                checkpointing=arguments.get("checkpointing", False), # Pass checkpointing
-                auto_approve=arguments.get("auto_approve", True)  # Default to True for MCP usage
-            )
-            self.interactive_sessions[session_id] = session
-            self.session_metadata[session_id] = {"created_at": asyncio.get_event_loop().time()}
-            return f"Interactive session {session_id} started successfully with auto-approval enabled"
+            # Send the response to the child process
+            if session.child:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, session.child.sendline, response_text
+                )
+
+                # Resume the task
+                task_info['status'] = 'RUNNING'
+                if 'prompt' in task_info:
+                    del task_info['prompt']
+
+                # Restart monitoring the task
+                task_info['task'] = asyncio.create_task(
+                    self._execute_chat_task(task_id, session, "")  # Empty message to continue
+                )
+
+                return f"Response '{response_text}' sent to task {task_id}. Task is now running."
+            else:
+                return f"Error: Session child process not available for task {task_id}"
+
         except Exception as e:
-            logger.error(f"Failed to start session {session_id}: {str(e)}")
-            return f"Failed to start session {session_id}: {str(e)}"
+            logger.error(f"Error responding to interaction: {e}")
+            return f"Error: Failed to send response: {str(e)}"
 
     async def _close_session(self, arguments: dict[str, Any]) -> str:
-        """Close an interactive session"""
+        """Close a session"""
         session_id = arguments["session_id"]
-        session = await self._get_session(session_id)
-        await session.close()
-        if session_id in self.interactive_sessions:
-            del self.interactive_sessions[session_id]
-        if session_id in self.session_metadata:
-            del self.session_metadata[session_id]
-        return f"Session {session_id} closed successfully"
 
-    async def _get_session(self, session_id: str) -> GeminiInteractiveSession:
-        """Get an existing session or raise an error if not found"""
-        if session_id not in self.interactive_sessions:
-            raise Exception(f"Session {session_id} not found or has been closed.")
-        session = self.interactive_sessions[session_id]
-        if not session.is_running():
-            await self._cleanup_dead_sessions()
-            raise Exception(f"Session {session_id} is no longer alive.")
-        return session
+        if session_id not in self.sessions:
+            return f"Error: Session {session_id} not found"
+
+        session = self.sessions[session_id]
+
+        try:
+            await session.close()
+            del self.sessions[session_id]
+
+            # Cancel any background tasks for this session
+            tasks_to_remove = [
+                task_id for task_id, task_info in self.background_tasks.items()
+                if task_info.get('session_id') == session_id
+            ]
+
+            for task_id in tasks_to_remove:
+                task_info = self.background_tasks[task_id]
+                if 'task' in task_info and not task_info['task'].done():
+                    task_info['task'].cancel()
+                del self.background_tasks[task_id]
+
+            logger.info(f"Closed session {session_id}")
+            return f"Session {session_id} closed successfully"
+
+        except Exception as e:
+            logger.error(f"Error closing session {session_id}: {e}")
+            return f"Error: Failed to close session {session_id}: {str(e)}"
 
     async def _cleanup_dead_sessions(self) -> None:
         """Remove sessions that are no longer running"""
-        dead_sessions = [sid for sid, s in self.interactive_sessions.items() if not s.is_running()]
+        dead_sessions = [
+            session_id for session_id, session in self.sessions.items()
+            if not session.is_running()
+        ]
+
         for session_id in dead_sessions:
             logger.info(f"Cleaning up dead session: {session_id}")
-            if session_id in self.interactive_sessions:
-                del self.interactive_sessions[session_id]
-            if session_id in self.session_metadata:
-                del self.session_metadata[session_id]
+            try:
+                await self.sessions[session_id].close()
+            except Exception:
+                pass
+            del self.sessions[session_id]
+
+    async def cleanup(self) -> None:
+        """Clean up all resources"""
+        logger.info("Cleaning up server resources...")
+
+        # Cancel all background tasks
+        for task_info in self.background_tasks.values():
+            if 'task' in task_info and not task_info['task'].done():
+                task_info['task'].cancel()
+
+        # Close all sessions
+        for session in self.sessions.values():
+            try:
+                await session.close()
+            except Exception as e:
+                logger.warning(f"Error closing session during cleanup: {e}")
 
     async def run(self) -> None:
         """Run the MCP server"""
@@ -378,8 +495,9 @@ class GeminiCLIMCPServer:
                     )
                 )
         except Exception as e:
-            logger.error(f"Failed to start server: {e}")
+            logger.error(f"Server error: {e}")
             raise
+
 
 async def main() -> None:
     """Main entry point"""
@@ -387,7 +505,6 @@ async def main() -> None:
     try:
         logger.info("Initializing Gemini CLI MCP Server")
         server = GeminiCLIMCPServer()
-        logger.info("Server initialized, starting...")
         await server.run()
     except KeyboardInterrupt:
         logger.info("Server interrupted by user")
