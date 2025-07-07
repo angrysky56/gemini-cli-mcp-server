@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gemini-cli-mcp-server"
-version = "0.1.0"
-description = "MCP server that properly wraps the actual Gemini CLI binary with all its built-in capabilities"
+version = "0.3.0"
+description = "Simple MCP server that provides access to your authenticated gemini-cli"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-keywords = ["mcp", "gemini", "ai", "cli", "server"]
+keywords = ["mcp", "gemini", "cli", "simple", "server"]
 authors = [
   {name = "AI Workspace", email = "workspace@example.com"},
 ]
@@ -22,7 +22,6 @@ classifiers = [
 ]
 dependencies = [
   "mcp>=1.2.0",
-  "pexpect>=4.9.0",
   "pydantic>=2.0.0",
   "typing-extensions>=4.5.0",
 ]

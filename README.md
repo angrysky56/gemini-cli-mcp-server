@@ -1,55 +1,44 @@
-# Gemini CLI MCP Server
+# Gemini API MCP Server
 
-A Model Context Protocol (MCP) server that provides access to your pre-authenticated gemini-cli, enabling seamless integration with Claude Desktop and other MCP clients.
+A Model Context Protocol (MCP) server that provides direct access to Google Gemini API capabilities. This server enables Claude Desktop and other MCP clients to use Gemini models for text generation, code analysis, vision tasks, and model comparison.
+
+## Features
+
+🤖 **Direct API Access** - No CLI wrapping, uses Google Generative AI SDK directly
+🔧 **Multiple Tools** - Text generation, file analysis, code review, vision analysis, model comparison
+🎯 **Configurable** - Choose models, adjust temperature, set token limits
+🖼️ **Vision Support** - Analyze images with Gemini's multimodal capabilities
+⚡ **Async & Fast** - Non-blocking operations for better performance
+🛡️ **Error Handling** - Comprehensive error handling and logging
 
 ## Prerequisites
 
-### 1. Install and Authenticate Gemini CLI
+### Google Gemini API Key
 
-**Important**: You must have gemini-cli installed and authenticated before using this MCP server.
+You need a Gemini API key from Google AI Studio:
 
-#### Install Gemini CLI
-```bash
-npm install -g @google-ai/gemini-cli
-```
+1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Create a new API key
+3. Set it as an environment variable:
 
-#### Authenticate (choose one method)
-
-**Option A: API Key** (Recommended)
 ```bash
 export GEMINI_API_KEY="your-api-key-here"
 ```
-Get your API key from: https://aistudio.google.com/app/apikey
 
-**Option B: Google Login (OAuth)**
-```bash
-gemini  # First run will prompt for authentication
-```
-
-**Option C: Vertex AI**
-```bash
-gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT="your-project-id"
-export GOOGLE_GENAI_USE_VERTEXAI=true
-```
-
-### 2. Verify Installation
-```bash
-gemini --version
-gemini -p "Hello world"  # Test that authentication works
-```
+Or alternatively, you can use `GOOGLE_API_KEY` if you prefer.
 
 ## Installation
 
 1. Clone this repository:
    ```bash
-   git clone <repository-url>
+   cd /home/ty/Repositories/ai_workspace
+   git clone <repository-url> gemini-cli-mcp-server
    cd gemini-cli-mcp-server
    ```
 
-2. Set up Python environment:
+2. Set up Python environment with uv:
    ```bash
-   uv venv --python 3.12 --seed
+   uv venv --python 3.12
    source .venv/bin/activate
    uv sync
    ```
@@ -58,212 +47,210 @@ gemini -p "Hello world"  # Test that authentication works
 
 ### Claude Desktop Setup
 
-1. Edit your Claude Desktop configuration file:
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Linux**: `~/.config/claude/claude_desktop_config.json`
+Edit your Claude Desktop configuration file:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/claude/claude_desktop_config.json`
 
-2. Add this server configuration:
-   ```json
-   {
-     "mcpServers": {
-       "gemini-cli": {
-         "command": "uv",
-         "args": [
-           "--directory",
-           "/path/to/gemini-cli-mcp-server",
-           "run",
-           "python",
-           "src/main.py"
-         ],
-         "env": {
-           "LOG_LEVEL": "INFO"
-         },
-         "timeout": 60000
-       }
-     }
-   }
-   ```
+Add this server configuration:
 
-3. Replace `/path/to/gemini-cli-mcp-server` with the actual path to this repository.
+```json
+{
+  "mcpServers": {
+    "gemini-api": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/home/ty/Repositories/ai_workspace/gemini-cli-mcp-server",
+        "run",
+        "python",
+        "src/main.py"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
 
-4. Restart Claude Desktop.
+Restart Claude Desktop after making this change.
 
 ## Available Tools
 
-### 🚀 gemini_start_session
-Start a new interactive Gemini CLI session.
+### 🚀 gemini_generate
+Generate text using any Gemini model with full parameter control.
 
 **Parameters:**
-- `session_id` (required): Unique identifier for the session
-- `starting_directory` (optional): Directory to start in (defaults to home directory)
-- `auto_approve` (optional): Auto-approve tool executions (default: true)
+- `prompt` (required): The text prompt
+- `model`: Model to use (default: gemini-1.5-flash)
+- `temperature`: Randomness control 0.0-2.0 (default: 1.0)
+- `max_output_tokens`: Maximum tokens to generate (default: 2048)
 
-### 💬 gemini_session_chat
-Send a message to an active session. Returns immediately with a task_id for monitoring.
+**Available Models:**
+- `gemini-2.0-flash-exp` - Latest experimental model
+- `gemini-1.5-pro` - Most capable model
+- `gemini-1.5-flash` - Fast and efficient
+- `gemini-1.5-flash-8b` - Smallest and fastest
 
-**Parameters:**
-- `session_id` (required): The session to send the message to
-- `message` (required): The prompt/message to send to Gemini
-
-### 📊 gemini_check_task_status
-Check the status of a background task and retrieve results when complete.
-
-**Parameters:**
-- `task_id` (required): ID returned from gemini_session_chat
-
-**Possible Statuses:**
-- `RUNNING`: Task is still executing
-- `COMPLETED`: Task finished successfully (includes result)
-- `BLOCKED_ON_INTERACTION`: Task needs user input
-- `ERROR`: Task failed
-
-### 🔄 gemini_session_respond_to_interaction
-Respond to interactive prompts when a task is blocked.
+### 📄 gemini_analyze_file
+Analyze any file using Gemini (supports both text and image files).
 
 **Parameters:**
-- `task_id` (required): ID of the blocked task
-- `response_text` (required): Response to send (e.g., "y", "n", or specific answer)
+- `file_path` (required): Path to the file
+- `analysis_prompt`: What to analyze (default: "Analyze this file and provide insights")
+- `model`: Gemini model to use
 
-### 🛑 gemini_close_session
-Close an active session and clean up resources.
+### 🔍 gemini_compare_models  
+Compare responses from multiple Gemini models for the same prompt.
 
 **Parameters:**
-- `session_id` (required): Session identifier to close
+- `prompt` (required): The prompt to test
+- `models`: List of models to compare (default: ["gemini-1.5-flash", "gemini-1.5-pro"])
+- `temperature`: Temperature setting for all models
+
+### 🖼️ gemini_with_vision
+Use Gemini's vision capabilities to analyze images.
+
+**Parameters:**
+- `image_path` (required): Path to image file
+- `prompt`: What to analyze about the image (default: "Describe this image in detail")
+- `model`: Vision-capable model to use
+
+**Supported Image Formats:** JPG, JPEG, PNG, GIF, BMP, WebP
+
+### 🧑‍💻 gemini_code_review
+Perform comprehensive code review using Gemini.
+
+**Parameters:**
+- `file_path` (required): Path to code file
+- `focus_areas`: Areas to focus on (default: ["code quality", "best practices", "potential bugs"])
+- `model`: Model to use (default: gemini-1.5-pro)
 
 ## Usage Examples
 
-### Basic Workflow
-
-1. **Start a session**:
-   ```
-   Use gemini_start_session with:
-   - session_id: "main"
-   - starting_directory: "/home/user/project"
-   ```
-
-2. **Send a task**:
-   ```
-   Use gemini_session_chat with:
-   - session_id: "main"
-   - message: "Analyze the files in @src/ and suggest improvements"
-   ```
-   → Returns task_id: "abc123"
-
-3. **Check progress**:
-   ```
-   Use gemini_check_task_status with:
-   - task_id: "abc123"
-   ```
-
-4. **Handle interactions** (if needed):
-   ```
-   Use gemini_session_respond_to_interaction with:
-   - task_id: "abc123"
-   - response_text: "y"
-   ```
-
-5. **Close session**:
-   ```
-   Use gemini_close_session with:
-   - session_id: "main"
-   ```
-
-### Working with Files
-
-Use Gemini CLI's `@` syntax to include file content:
+### Basic Text Generation
 ```
-"Analyze this code: @app.py"
-"Review all files in @src/ and suggest improvements"
-"Compare @old-version.py with @new-version.py"
+Use gemini_generate with:
+- prompt: "Explain quantum computing in simple terms"
+- model: "gemini-1.5-pro"
+- temperature: 0.7
 ```
 
-### Gemini CLI Commands
-
-You can use any Gemini CLI command:
+### File Analysis
 ```
-"/stats"           # Show session statistics
-"/memory show"     # Display current memory
-"/tools"           # List available tools
-"/chat save backup" # Save conversation state
-"!ls -la"          # Execute shell commands
+Use gemini_analyze_file with:
+- file_path: "/path/to/script.py"
+- analysis_prompt: "Review this code for security issues"
 ```
 
-## Key Features
+### Image Analysis
+```
+Use gemini_with_vision with:
+- image_path: "/path/to/diagram.png"
+- prompt: "Explain this architecture diagram"
+```
 
-- **Pre-authenticated**: Uses your existing gemini-cli authentication
-- **Persistent sessions**: Sessions stay active until explicitly closed
-- **Asynchronous**: Long-running tasks don't block the interface
-- **Interactive support**: Handles prompts that require user input
-- **File integration**: Full support for `@file-path` syntax
-- **Auto-approval**: Optional auto-approval for seamless operation
+### Model Comparison
+```
+Use gemini_compare_models with:
+- prompt: "Write a Python function to calculate fibonacci numbers"
+- models: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+```
+
+### Code Review
+```
+Use gemini_code_review with:
+- file_path: "/path/to/component.tsx"
+- focus_areas: ["performance", "accessibility", "React best practices"]
+```
+
+## Key Differences from CLI Wrapper Approach
+
+This server provides **direct API access** rather than wrapping the CLI tool:
+
+✅ **Advantages:**
+- Much more reliable and faster
+- Configurable parameters (temperature, tokens, models)
+- Better error handling and debugging
+- No complex session management
+- Supports all file types including images
+- Async/non-blocking operations
+
+❌ **What it doesn't do:**
+- It doesn't provide the interactive Gemini CLI session experience
+- It doesn't include CLI-specific features like `/memory` or `/tools` commands
+- It's focused on API capabilities rather than CLI workflow
 
 ## Troubleshooting
 
 ### Common Issues
 
-**"gemini command not found"**
-- Install gemini-cli: `npm install -g @google-ai/gemini-cli`
-- Check PATH: `which gemini`
+**"API key not found"**
+- Ensure `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set
+- Verify the key is valid at [Google AI Studio](https://aistudio.google.com/)
 
-**Authentication errors**
-- Verify authentication: `gemini -p "test"`
-- Check environment variables (GEMINI_API_KEY, etc.)
-- Re-authenticate if needed
+**"Model not available"**
+- Check the model name spelling
+- Some models may not be available in your region
+- Try using `gemini-1.5-flash` as a fallback
 
-**Session won't start**
-- Verify gemini works manually
-- Check starting directory exists
-- Try home directory first
+**"File not found"**
+- Verify file paths are absolute or relative to where Claude Desktop runs
+- Check file permissions
 
-**Tasks stuck running**
-- Some tasks take 10+ minutes for complex analysis
-- Check for interactive prompts (BLOCKED_ON_INTERACTION status)
-- Be patient with large file analysis
+**"Image analysis fails"**
+- Ensure image format is supported (JPG, PNG, GIF, BMP, WebP)
+- Check image file isn't corrupted
+- Try with a smaller image if very large
 
 ### Debug Mode
 
-For detailed logs, set:
-```json
-"env": {
-  "LOG_LEVEL": "DEBUG"
-}
-```
+For detailed logging, check Claude Desktop logs:
 
-Check Claude Desktop logs:
+**macOS:**
 ```bash
 tail -f ~/Library/Logs/Claude/mcp*.log
 ```
 
-## Performance Notes
-
-- **Task Duration**: Simple commands take seconds, complex analysis can take 10+ minutes
-- **Memory Usage**: Each session uses modest memory, clean up when done
-- **File Access**: Large directories may take time to analyze
-- **Concurrent Sessions**: Multiple sessions supported but use resources
-
-## Security Considerations
-
-- Auto-approval (`--yolo`) executes tools without confirmation
-- Sessions run with your user permissions
-- Use `auto_approve=false` for sensitive operations
-- Close sessions when done to free resources
+**Linux:**
+```bash
+tail -f ~/.local/share/Claude/logs/mcp*.log
+```
 
 ## Development
 
 ### Running Manually
 ```bash
-uv run python src/main.py
+source .venv/bin/activate
+python src/main.py
 ```
+
+### Testing Tools
+You can test individual tools using the MCP inspector or by calling them directly through Claude Desktop.
 
 ### Project Structure
 ```
 src/
-├── main.py              # MCP server implementation
-└── gemini_cli_wrapper.py # Gemini CLI interface
-prompts/
-├── usage_guide.md       # Detailed usage instructions
-└── troubleshooting.md   # Common issues and solutions
+├── main.py              # Main MCP server implementation
+└── __init__.py          # Package initialization
+
+archived/
+└── gemini_cli_wrapper.py # Old CLI wrapper (archived)
 ```
+
+## Performance Notes
+
+- **Model Speed**: flash models are fastest, pro models are most capable
+- **Temperature**: Lower values (0.1-0.5) for factual tasks, higher (0.8-1.5) for creative tasks
+- **Token Limits**: Adjust `max_output_tokens` based on your needs
+- **Vision Tasks**: Image analysis may take longer depending on image size
+
+## Security Considerations
+
+- API keys are passed through environment variables (secure)
+- No data is stored locally (stateless server)
+- Safety settings are configured to be permissive for development use
+- All operations run with your API key quotas and billing
 
 ## License
 
@@ -271,8 +258,10 @@ MIT License - See LICENSE file for details.
 
 ## Contributing
 
-Contributions welcome! Please:
-1. Test your changes with real gemini-cli
-2. Update documentation
-3. Follow existing code style
-4. Add appropriate error handling
+Contributions welcome! This server uses:
+- **uv** for dependency management
+- **asyncio** for async operations
+- **google-generativeai** for API access
+- **MCP SDK** for protocol implementation
+
+Please test changes thoroughly and update documentation as needed.

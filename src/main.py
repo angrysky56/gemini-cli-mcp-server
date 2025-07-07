@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Proper Gemini CLI MCP Server
+Fixed Gemini CLI MCP Server
 
-An MCP server that provides access to the actual gemini-cli binary,
-leveraging all its built-in tools and capabilities.
+Based on VibeKit's proven working implementation pattern.
+Uses the exact same approach that works in production VibeKit environments.
 """
 
 import asyncio
 import json
 import logging
-import signal
-import subprocess
+import os
 import sys
-import uuid
-from collections.abc import Coroutine
 from typing import Any
 
 import mcp.server.stdio
@@ -22,9 +19,7 @@ from mcp.server import Server
 from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.models import InitializationOptions
 
-from gemini_cli_wrapper import GeminiCLIWrapper, GeminiInteractiveSession, InteractivePromptDetected
-
-# Configure logging to stderr for MCP servers
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -33,169 +28,152 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Global cleanup for graceful shutdown
-def signal_handler(signum: int, frame: Any) -> None:
-    """Handle shutdown signals"""
-    logger.info(f"Received signal {signum}, shutting down gracefully")
-    sys.exit(0)
-
-
-# Register cleanup handlers
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-
-def find_gemini_command() -> str:
-    """Find the gemini command path using 'which'"""
-    try:
-        result = subprocess.run(
-            ["which", "gemini"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        path = result.stdout.strip()
-        if not path:
-            raise Exception("which gemini returned empty path")
-        return path
-    except subprocess.CalledProcessError:
-        raise Exception("gemini command not found in PATH")
-    except Exception as e:
-        raise Exception(f"Failed to find gemini command: {str(e)}")
-
-
-class GeminiCLIMCPServer:
-    """MCP Server that wraps the actual Gemini CLI with persistent session"""
+class FixedGeminiMCPServer:
+    """Fixed MCP Server using VibeKit's proven gemini-cli integration pattern"""
 
     def __init__(self) -> None:
-        self.server = Server("gemini-cli-mcp-server")
-        self.interactive_sessions: dict[str, GeminiInteractiveSession] = {}
-        self.session_metadata: dict[str, dict[str, Any]] = {}
-        self.background_tasks: dict[str, dict[str, Any]] = {}
-
-        try:
-            gemini_cli_path = find_gemini_command()
-            self.gemini_cli = GeminiCLIWrapper(gemini_cli_path)
-            logger.info(f"Gemini CLI wrapper initialized successfully (path: {gemini_cli_path})")
-        except Exception as e:
-            logger.error(f"Failed to initialize Gemini CLI wrapper: {str(e)}")
-            raise
+        self.server = Server("fixed-gemini-mcp-server")
+        self._verified = False  # Track if gemini-cli has been verified
         self._setup_handlers()
 
-    async def cleanup(self) -> None:
-        """Clean up resources when shutting down"""
-        logger.info("Cleaning up active sessions and tasks...")
-        for task in self.background_tasks.values():
-            if task.get('task') and not task['task'].done():
-                task['task'].cancel()
-        for session in self.interactive_sessions.values():
-            await session.close()
+    async def _verify_gemini(self) -> None:
+        """Verify gemini-cli is available (only once)"""
+        if self._verified:
+            return
 
-    def _estimate_task(self, message: str) -> tuple[str, str]:
-        """Estimates the complexity and duration of a task based on the prompt."""
-        message_lower = message.lower()
-        is_long_task = False
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "gemini", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
 
-        # Complex, long-running tasks
-        complex_keywords = ["analyze", "refactor", "implement", "write a program", "create a script", "summarize this book"]
-        if any(keyword in message_lower for keyword in complex_keywords) or len(message) > 1000:
-            estimate = "10-30+ minutes"
-            is_long_task = True
-        # Medium tasks involving I/O
-        elif '@' in message or '!' in message:
-            estimate = "1-5 minutes"
-        # Simple, quick commands
-        elif message.strip() in ["/stats", "/memory show", "/tools"]:
-            estimate = "~5-10 seconds"
-        else:
-            estimate = "~1-2 minutes"
-
-        note = f"Please use gemini_check_task_status with the returned task_id to get the result. Recommended check time is in {estimate}."
-        if is_long_task:
-            note += " IMPORTANT: This is a long-running task. Do not close the chat or client connection, as it will terminate the process."
-
-        return estimate, note
+            if process.returncode != 0:
+                raise Exception(f"Gemini CLI not working: {stderr.decode()}")
+            logger.info(f"Gemini CLI available: {stdout.decode().strip()}")
+            self._verified = True
+        except Exception as e:
+            raise Exception(f"Gemini CLI not found or not working: {e}")
 
     def _setup_handlers(self) -> None:
-        """Set up all MCP request handlers"""
+        """Set up MCP handlers"""
 
         @self.server.list_tools()
         async def handle_list_tools() -> list[types.Tool]:
-            """List available Gemini CLI tools"""
             return [
                 types.Tool(
-                    name="gemini_start_session",
-                    description="Start an interactive Gemini CLI session for ongoing conversation.",
+                    name="gemini_ask",
+                    description="Ask Gemini a question (uses VibeKit's proven pattern)",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "session_id": {"type": "string", "description": "Unique identifier for this session"},
+                            "prompt": {
+                                "type": "string",
+                                "description": "Question or prompt for Gemini"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Gemini model to use",
+                                "default": "gemini-2.5-flash"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Working directory (for file context)",
+                                "default": "."
+                            },
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Files to include using @ syntax",
+                                "default": []
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "description": "Timeout in seconds",
+                                "default": 60
+                            }
                         },
-                        "required": ["session_id"]
+                        "required": ["prompt"]
                     }
                 ),
                 types.Tool(
-                    name="gemini_session_chat",
-                    description="Send a message to a session. This is non-blocking and returns a task_id.",
+                    name="gemini_code",
+                    description="Generate code changes using Gemini (VibeKit code mode)",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "session_id": {"type": "string", "description": "Session identifier"},
-                            "message": {"type": "string", "description": "Message/prompt to send to the session"}
+                            "prompt": {
+                                "type": "string",
+                                "description": "Code generation request"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Gemini model to use",
+                                "default": "gemini-2.5-pro"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Working directory",
+                                "default": "."
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "description": "Timeout in seconds",
+                                "default": 120
+                            }
                         },
-                        "required": ["session_id", "message"]
+                        "required": ["prompt"]
                     }
                 ),
                 types.Tool(
-                    name="gemini_check_task_status",
-                    description="Check the status of a background task and retrieve the result when complete.",
+                    name="gemini_with_files",
+                    description="Ask Gemini with specific files (uses @ syntax)",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "string", "description": "The ID of the task to check"}
+                            "prompt": {
+                                "type": "string",
+                                "description": "The question or prompt"
+                            },
+                            "file_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of file paths to include"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Gemini model to use",
+                                "default": "gemini-2.5-flash"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Working directory",
+                                "default": "."
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "description": "Timeout in seconds",
+                                "default": 90
+                            }
                         },
-                        "required": ["task_id"]
-                    }
-                ),
-                types.Tool(
-                    name="gemini_session_respond_to_interaction",
-                    description="Respond to an interactive prompt in a blocked session.",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "task_id": {"type": "string", "description": "The ID of the blocked task."},
-                            "response_text": {"type": "string", "description": "The text to send as a response to the prompt."}
-                        },
-                        "required": ["task_id", "response_text"]
-                    }
-                ),
-                types.Tool(
-                    name="gemini_close_session",
-                    description="Close an interactive Gemini CLI session.",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "session_id": {"type": "string", "description": "Session identifier"}
-                        },
-                        "required": ["session_id"]
+                        "required": ["prompt", "file_paths"]
                     }
                 )
             ]
 
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-            """Handle tool execution requests"""
             try:
-                if name == "gemini_start_session":
-                    result = await self._start_interactive_session(arguments)
-                elif name == "gemini_session_chat":
-                    result = await self._session_chat(arguments)
-                elif name == "gemini_check_task_status":
-                    result = await self._check_task_status(arguments)
-                elif name == "gemini_session_respond_to_interaction":
-                    result = await self._session_respond_to_interaction(arguments)
-                elif name == "gemini_close_session":
-                    result = await self._close_session(arguments)
+                # Verify gemini on first use
+                await self._verify_gemini()
+
+                if name == "gemini_ask":
+                    result = await self._ask_gemini(arguments)
+                elif name == "gemini_code":
+                    result = await self._code_generation(arguments)
+                elif name == "gemini_with_files":
+                    result = await self._ask_with_files(arguments)
                 else:
                     result = f"Unknown tool: {name}"
 
@@ -206,191 +184,167 @@ class GeminiCLIMCPServer:
                 logger.error(error_msg, exc_info=True)
                 return [types.TextContent(type="text", text=error_msg)]
 
-    async def _run_and_monitor_task(self, task_id: str, coro: Coroutine):
-        """Wrapper to run a coroutine and store its result, handling interactive prompts."""
-        try:
-            result = await coro
-            self.background_tasks[task_id]['status'] = 'COMPLETE'
-            self.background_tasks[task_id]['result'] = result
-        except InteractivePromptDetected as e:
-            logger.info(f"Task {task_id} blocked on interactive prompt: {e.prompt_text}")
-            self.background_tasks[task_id]['status'] = 'BLOCKED_ON_INTERACTION'
-            self.background_tasks[task_id]['prompt'] = e.prompt_text
-        except Exception as e:
-            logger.error(f"Task {task_id} failed: {e}")
-            self.background_tasks[task_id]['status'] = 'ERROR'
-            self.background_tasks[task_id]['result'] = str(e)
+    async def _ask_gemini(self, arguments: dict[str, Any]) -> str:
+        """Ask Gemini using VibeKit's ask mode"""
+        prompt = arguments["prompt"]
+        model = arguments.get("model", "gemini-2.5-flash")
+        working_dir = arguments.get("working_dir", ".")
+        files = arguments.get("files", [])
+        timeout = arguments.get("timeout", 60)
 
-    async def _start_background_task(self, session_id: str, coro: Coroutine, message: str) -> str:
-        """Starts a background task and returns its ID with an estimated time."""
-        await self._get_session(session_id)
-        task_id = str(uuid.uuid4())
-
-        estimated_completion, note = self._estimate_task(message)
-
-        task = asyncio.create_task(self._run_and_monitor_task(task_id, coro))
-        self.background_tasks[task_id] = {
-            'status': 'RUNNING',
-            'task': task,
-            'session_id': session_id # Store session_id for responding to interaction
-        }
-
-        response = {
-            "status": "STARTED",
-            "task_id": task_id,
-            "estimated_completion": estimated_completion,
-            "note": note
-        }
-        return json.dumps(response, indent=2)
-
-    async def _session_chat(self, arguments: dict[str, Any]) -> str:
-        """Send a message to an interactive session as a background task."""
-        session_id = arguments["session_id"]
-        message = arguments["message"]
-        session = await self._get_session(session_id)
-        return await self._start_background_task(session_id, session.send_prompt(message), message)
-
-    async def _check_task_status(self, arguments: dict[str, Any]) -> str:
-        """Checks the status of a background task."""
-        task_id = arguments["task_id"]
-        task_info = self.background_tasks.get(task_id)
-
-        if not task_info:
-            return json.dumps({"status": "NOT_FOUND"})
-
-        status = task_info["status"]
-        if status == 'RUNNING':
-            return json.dumps({"status": "RUNNING"})
-        elif status == 'BLOCKED_ON_INTERACTION':
-            return json.dumps({
-                "status": "BLOCKED_ON_INTERACTION",
-                "prompt": task_info.get('prompt', 'No prompt text available.')
-            }, indent=2)
-        else:
-            result = task_info.get('result', 'No result found.')
-            del self.background_tasks[task_id]
-            return json.dumps({"status": status, "result": result}, indent=2)
-
-    async def _session_respond_to_interaction(self, arguments: dict[str, Any]) -> str:
-        """Responds to an interactive prompt in a blocked session."""
-        task_id = arguments["task_id"]
-        response_text = arguments["response_text"]
-        task_info = self.background_tasks.get(task_id)
-
-        if not task_info:
-            return f"Error: Task {task_id} not found."
-        if task_info['status'] != 'BLOCKED_ON_INTERACTION':
-            return f"Error: Task {task_id} is not blocked on interaction. Current status: {task_info['status']}"
-
-        session_id = task_info.get('session_id')
-        if not session_id:
-            return f"Error: Could not find session_id for task {task_id}."
-
-        session = await self._get_session(session_id)
-
-        # Send the response to the child process
-        if session.child is None:
-            return f"Error: Session child process is not available for session {session_id}."
-        await asyncio.get_event_loop().run_in_executor(
-            None, session.child.sendline, response_text
+        # VibeKit's ask mode instruction
+        instruction = (
+            "Research the repository and answer the user's questions. "
+            "Do NOT make any changes to any files in the repository."
         )
 
-        # Reset task status to RUNNING and restart monitoring
-        task_info['status'] = 'RUNNING'
-        # Re-start monitoring the task by calling send_prompt with an empty string
-        # This will cause _read_response to continue reading from the child process
-        task_info['task'] = asyncio.create_task(self._run_and_monitor_task(task_id, session.send_prompt("")))
-        del task_info['prompt'] # Clear the prompt text
+        # Build full prompt with files
+        user_prompt = prompt
+        if files:
+            file_refs = " ".join(f"@{f}" for f in files)
+            user_prompt = f"{file_refs} {prompt}"
 
-        return f"Response '{response_text}' sent to task {task_id}. Task is now RUNNING."
+        full_prompt = f"{instruction}\n\nUser: {user_prompt}"
 
-    async def _start_interactive_session(self, arguments: dict[str, Any]) -> str:
-        """Start an interactive Gemini CLI session"""
-        session_id = arguments["session_id"]
-        await self._cleanup_dead_sessions()
-        if session_id in self.interactive_sessions:
-            return f"Session {session_id} already exists"
+        return await self._execute_vibekit_pattern(full_prompt, model, working_dir, timeout)
+
+    async def _code_generation(self, arguments: dict[str, Any]) -> str:
+        """Generate code using VibeKit's code mode"""
+        prompt = arguments["prompt"]
+        model = arguments.get("model", "gemini-2.5-pro")
+        working_dir = arguments.get("working_dir", ".")
+        timeout = arguments.get("timeout", 120)
+
+        # VibeKit's code mode instruction
+        instruction = (
+            "Do the necessary changes to the codebase based on the users input.\n"
+            "Don't ask any follow up questions."
+        )
+
+        full_prompt = f"{instruction}\n\nUser: {prompt}"
+
+        return await self._execute_vibekit_pattern(full_prompt, model, working_dir, timeout)
+
+    async def _ask_with_files(self, arguments: dict[str, Any]) -> str:
+        """Ask with files using VibeKit pattern"""
+        prompt = arguments["prompt"]
+        file_paths = arguments["file_paths"]
+        model = arguments.get("model", "gemini-2.5-flash")
+        working_dir = arguments.get("working_dir", ".")
+        timeout = arguments.get("timeout", 90)
+
+        # Build prompt with file references
+        file_refs = " ".join(f"@{f}" for f in file_paths)
+        full_prompt = f"{file_refs} {prompt}"
+
+        return await self._execute_vibekit_pattern(full_prompt, model, working_dir, timeout)
+
+    async def _escape_prompt_python(self, prompt: str) -> str:
+        """Python version of VibeKit's prompt escaping"""
+        # Escape backticks, quotes, dollar signs, and backslashes
+        import re
+        return re.sub(r'[`"$\\]', r'\\\g<0>', prompt)
+
+    async def _execute_vibekit_pattern(self, prompt: str, model: str, working_dir: str, timeout: int) -> str:
+        """Execute using VibeKit's exact pattern"""
         try:
-            session = await self.gemini_cli.start_interactive_session(
-                working_directory=arguments.get("working_directory", "."), # Pass working_directory
-                model=arguments.get("model"), # Pass model
-                debug=arguments.get("debug", False), # Pass debug
-                checkpointing=arguments.get("checkpointing", False) # Pass checkpointing
+            logger.info(f"Executing VibeKit pattern in {working_dir}: {prompt[:50]}...")
+
+            # Escape prompt like VibeKit
+            escaped_prompt = self._escape_prompt_python(prompt)
+
+            # Build environment like VibeKit (set both keys)
+            exec_env = {
+                **os.environ,
+                'NODE_NO_WARNINGS': '1',
+                'TERM': 'xterm-256color'
+            }
+
+            # Add API keys if available
+            if 'GEMINI_API_KEY' in os.environ:
+                exec_env['GEMINI_API_KEY'] = os.environ['GEMINI_API_KEY']
+                exec_env['GOOGLE_API_KEY'] = os.environ['GEMINI_API_KEY']  # VibeKit sets both
+
+            # Use VibeKit's exact command pattern
+            cmd_args = [
+                "gemini",
+                "--model", model,
+                "--prompt", escaped_prompt,
+                "--yolo"  # VibeKit's auto-approval pattern
+            ]
+
+            logger.info(f"VibeKit command: gemini --model {model} --prompt [escaped] --yolo")
+
+            # Execute like VibeKit
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                cwd=working_dir,
+                env=exec_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            self.interactive_sessions[session_id] = session
-            self.session_metadata[session_id] = {"created_at": asyncio.get_event_loop().time()}
-            return f"Interactive session {session_id} started successfully"
+
+            # Wait with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise Exception(f"Command timed out after {timeout} seconds")
+
+            # Process output
+            stdout_text = stdout.decode('utf-8').strip()
+            stderr_text = stderr.decode('utf-8').strip()
+
+            if process.returncode != 0:
+                if stderr_text:
+                    raise Exception(f"Gemini failed (code {process.returncode}): {stderr_text}")
+                else:
+                    raise Exception(f"Gemini failed with exit code {process.returncode}")
+
+            result = stdout_text or "Command completed successfully"
+
+            if not result:
+                return "No output from Gemini"
+
+            logger.info(f"VibeKit pattern success: {len(result)} characters")
+            return result
+
         except Exception as e:
-            logger.error(f"Failed to start session {session_id}: {str(e)}")
-            return f"Failed to start session {session_id}: {str(e)}"
-
-    async def _close_session(self, arguments: dict[str, Any]) -> str:
-        """Close an interactive session"""
-        session_id = arguments["session_id"]
-        session = await self._get_session(session_id)
-        await session.close()
-        if session_id in self.interactive_sessions:
-            del self.interactive_sessions[session_id]
-        if session_id in self.session_metadata:
-            del self.session_metadata[session_id]
-        return f"Session {session_id} closed successfully"
-
-    async def _get_session(self, session_id: str) -> GeminiInteractiveSession:
-        """Get an existing session or raise an error if not found"""
-        if session_id not in self.interactive_sessions:
-            raise Exception(f"Session {session_id} not found or has been closed.")
-        session = self.interactive_sessions[session_id]
-        if not session.is_running():
-            await self._cleanup_dead_sessions()
-            raise Exception(f"Session {session_id} is no longer alive.")
-        return session
-
-    async def _cleanup_dead_sessions(self) -> None:
-        """Remove sessions that are no longer running"""
-        dead_sessions = [sid for sid, s in self.interactive_sessions.items() if not s.is_running()]
-        for session_id in dead_sessions:
-            logger.info(f"Cleaning up dead session: {session_id}")
-            if session_id in self.interactive_sessions:
-                del self.interactive_sessions[session_id]
-            if session_id in self.session_metadata:
-                del self.session_metadata[session_id]
+            logger.error(f"Error in VibeKit pattern: {e}")
+            raise
 
     async def run(self) -> None:
         """Run the MCP server"""
-        logger.info("Starting Gemini CLI MCP Server")
-        try:
-            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-                await self.server.run(
-                    read_stream,
-                    write_stream,
-                    InitializationOptions(
-                        server_name="gemini-cli-mcp-server",
-                        server_version="1.0.0",
-                        capabilities=self.server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={}
-                        ),
-                    )
+        logger.info("Starting Fixed Gemini MCP Server (VibeKit Pattern)")
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await self.server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="fixed-gemini-mcp-server",
+                    server_version="0.4.0",
+                    capabilities=self.server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={}
+                    ),
                 )
-        except Exception as e:
-            logger.error(f"Failed to start server: {e}")
-            raise
+            )
+
 
 async def main() -> None:
     """Main entry point"""
-    server = None
     try:
-        logger.info("Initializing Gemini CLI MCP Server")
-        server = GeminiCLIMCPServer()
-        logger.info("Server initialized, starting...")
+        server = FixedGeminiMCPServer()
         await server.run()
     except KeyboardInterrupt:
-        logger.info("Server interrupted by user")
+        logger.info("Server interrupted")
     except Exception as e:
         logger.error(f"Server error: {e}", exc_info=True)
-    finally:
-        if server:
-            await server.cleanup()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
